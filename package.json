@@ -5,7 +5,7 @@
   "private": true,
   "type": "commonjs",
   "engines": {
-    "node": "20.x"
+    "node": "24.x"
   },
   "prisma": {
     "schema": "src/database/schema.prisma"

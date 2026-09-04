@@ -1,0 +1,13 @@
+# Gateway de pagamentos — nada aqui deve ser indexado.
+#
+# O checkout carrega referência de cobrança na URL e o painel é operacional;
+# nenhum dos dois tem por que aparecer em busca.
+#
+# Esta pasta existe também por um motivo de build: a Vercel exige um diretório
+# de saída quando o projeto define `buildCommand`, mesmo num projeto que só tem
+# função serverless. Um único arquivo aqui satisfaz isso sem sombrear nenhuma
+# rota do app — os arquivos estáticos são checados antes dos rewrites, então
+# nada além de /robots.txt deve morar aqui.
+
+User-agent: *
+Disallow: /

@@ -170,6 +170,25 @@ Antes de abrir para clientes, rode `npm run preflight` **apontando para as
 variáveis de produção**. Ele confere rede, float, credencial do PSP e limites, e
 sai com código 1 se algo faltar.
 
+## Por que existe uma pasta `public/` com um robots.txt
+
+A Vercel exige um diretório de saída quando o projeto define `buildCommand` —
+mesmo num projeto que não gera estático nenhum, como este, que é só uma função
+serverless (`api/index.ts`) com rewrite de todas as rotas. Sem isso o build
+termina com:
+
+```
+Error: No Output Directory named "public" found after the Build completed.
+```
+
+`public/robots.txt` resolve e ainda serve para algo: o checkout carrega
+referência de cobrança na URL e o painel é operacional; nenhum dos dois tem por
+que ser indexado.
+
+**Não ponha mais nada em `public/`.** Arquivos estáticos são resolvidos ANTES
+dos rewrites: um `index.html` ali sombrearia a rota `/` do app, e um
+`admin.html` sombrearia o painel.
+
 ## Variáveis de ambiente
 
 Obrigatórias em qualquer host:
