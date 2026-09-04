@@ -79,6 +79,22 @@ const boolish = (fallback: boolean) =>
     .optional()
     .transform((v) => (v === undefined || v === '' ? fallback : /^(1|true|yes|on)$/i.test(v)));
 
+/**
+ * Instruções de pagamento por trilho, vindas de `DEPOSIT_INSTRUCTIONS_JSON`.
+ *
+ * Ficam em env (e não no banco) porque são dados do OPERADOR, não do produto:
+ * chave Pix, IBAN, titular. Trocar de conta é um redeploy, não uma migração.
+ */
+const instructionSchema = z.object({
+  label: z.string().min(1).optional(),
+  /** Chave Pix / IBAN / número MB Way. Para USDC, default = endereço do vault. */
+  payTo: z.string().min(1).optional(),
+  holder: z.string().min(1).optional(),
+  lines: z.array(z.string()).optional(),
+});
+
+const instructionsSchema = z.record(z.string(), instructionSchema);
+
 const envSchema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: numeric(3000, { min: 1, max: 65_535 }),
@@ -112,6 +128,80 @@ const envSchema = z.object({
 
   RECIPIENTS_JSON: z.string().min(2, 'RECIPIENTS_JSON é obrigatória (seed inicial)'),
 
+  // ── Provedor interno de depósitos (ver deposit.service.ts) ──
+  /** Kill switch do checkout público `/pay`. */
+  DEPOSIT_ENABLED: boolish(true),
+  /** Trilhos oferecidos, CSV. Ex.: "USDC,PIX,MBWAY". */
+  DEPOSIT_METHODS: z.string().default('USDC'),
+  /** Chave Pix, IBAN, titular... por trilho. Ver `instructionsSchema`. */
+  DEPOSIT_INSTRUCTIONS_JSON: z.string().default('{}'),
+  /**
+   * Faixa aceita por depósito, em unidades da moeda escolhida.
+   * O teto é o limite de exposição do teste: cada ordem consome USDC do float
+   * do vault, e `MAX_ORDER_INPUT_RAW` continua valendo como trava final.
+   */
+  DEPOSIT_MIN_AMOUNT: numeric(5, { min: 1 }),
+  DEPOSIT_MAX_AMOUNT: numeric(500, { min: 1 }),
+  /** Validade da intenção. Depois disso o preço mostrado não vale mais. */
+  DEPOSIT_INTENT_TTL_MINUTES: numeric(45, { min: 5, max: 1_440 }),
+  /** Detecção on-chain de depósitos USDC (o único trilho automático). */
+  DEPOSIT_AUTOCONFIRM: boolish(true),
+  /** Quantas assinaturas recentes da ATA do vault a varredura inspeciona. */
+  DEPOSIT_SCAN_SIGNATURES: numeric(30, { min: 1, max: 200 }),
+  /** Intenções por IP por hora — freio de abuso no endpoint público. */
+  DEPOSIT_MAX_INTENTS_PER_HOUR: numeric(20, { min: 1 }),
+  /**
+   * Recusa o depósito quando o vault não tem USDC para lastrear a ordem.
+   *
+   * Deixe ligado. Desligar significa aceitar dinheiro de cliente sem ter como
+   * entregar o SOL — o cliente paga e a ordem trava até alguém fundear o vault.
+   */
+  DEPOSIT_REQUIRE_FLOAT: boolish(true),
+
+  // ── Carteiras geradas para o cliente (custódia) ──
+  /**
+   * Liga a geração de carteira no checkout. Com isto o cliente não precisa ter
+   * carteira nenhuma — e o operador passa a guardar chaves de terceiros.
+   */
+  WALLET_GENERATION: boolish(true),
+  /**
+   * Chave mestra que cifra as chaves privadas dos clientes (AES-256-GCM).
+   * Aceita 32 bytes em hex, 32 bytes em base64, ou uma frase longa.
+   *
+   * **Perder isto é perder o dinheiro dos clientes.** Guarde fora do banco e
+   * fora do repositório, com backup.
+   */
+  WALLET_ENCRYPTION_KEY: z.string().optional(),
+
+  // ── Mercado Pago (trilho CARD) ──
+  /**
+   * URL pública desta aplicação. O PSP precisa dela para o retorno do cliente
+   * e para o webhook. Em localhost o webhook não chega — e é por isso que o
+   * status também é consultado no poll da página (ver `mercadopago.service`).
+   */
+  PUBLIC_BASE_URL: z.string().url().optional().or(z.literal('')),
+  /** `TEST-...` na sandbox, `APP_USR-...` em produção. */
+  MERCADOPAGO_ACCESS_TOKEN: z.string().optional(),
+  /**
+   * Public Key da mesma aplicação. Vai para o NAVEGADOR de propósito: é ela
+   * que autoriza o SDK do MP a tokenizar o cartão dentro da nossa página.
+   * Não é segredo — o segredo é o access token, que nunca sai do servidor.
+   */
+  MERCADOPAGO_PUBLIC_KEY: z.string().optional(),
+  /** Segredo da assinatura do webhook (painel do MP → Webhooks). */
+  MERCADOPAGO_WEBHOOK_SECRET: z.string().optional(),
+  /** Usa `sandbox_init_point` em vez do link de produção. */
+  MERCADOPAGO_SANDBOX: boolish(true),
+  MERCADOPAGO_API_BASE: z.string().url().default('https://api.mercadopago.com'),
+  /**
+   * País da conta do Mercado Pago (o `site_id` da API).
+   *
+   * Define a moeda que a conta consegue processar e quais BINs de cartão ela
+   * reconhece. Uma conta MLB (Brasil) cobra em BRL e não encontra meio de
+   * pagamento para um cartão europeu — é o erro `no_payment_method_for_provided_bin`.
+   */
+  MERCADOPAGO_SITE: z.enum(['MLB', 'MLA', 'MLM', 'MLC', 'MCO', 'MPE', 'MLU']).default('MLB'),
+
   // `quote-api.jup.ag/v6` foi retirado do ar (o host não resolve mais).
   // `lite-api.jup.ag/swap/v1` é o tier público atual e serve exatamente o
   // mesmo contrato do v6 (/quote e /swap, mesmos campos) — verificado.
@@ -122,6 +212,26 @@ const envSchema = z.object({
   PRIORITY_FEE_MICRO_LAMPORTS: numeric(200_000, { min: 0 }),
   /** Aborta o swap se o price impact passar disto (proteção contra pool raso). */
   MAX_PRICE_IMPACT_BPS: numeric(300, { min: 1, max: BPS_TOTAL }),
+
+  /**
+   * Custo de rede repassado ao cliente, em lamports.
+   *
+   * Cobre a taxa do swap (com prioridade) mais a da transferência de
+   * liquidação. É descontado do SOL dele e fica no vault como reembolso — por
+   * isso o vault não drena com o volume.
+   *
+   * Default 0,0002 SOL: folgado para as duas transações com a prioridade
+   * configurada. Subir demais é cobrar do cliente o que não foi gasto.
+   */
+  NETWORK_COST_LAMPORTS: numeric(200_000, { min: 0 }),
+  /**
+   * Carteira que recebe as taxas de gás acumuladas.
+   *
+   * O custo cobrado do cliente fica no vault (é ele que paga as taxas das
+   * próximas ordens); o que passa da reserva pode ser varrido para cá.
+   * Vazio = nada é varrido, tudo permanece no vault.
+   */
+  GAS_FEE_WALLET: z.string().optional(),
 
   FEE_RESERVE_LAMPORTS: numeric(10_000_000, { min: 0 }),
   MIN_TRANSFER_LAMPORTS: numeric(890_880, { min: 1 }),
@@ -203,6 +313,100 @@ const recipientsSeed = (() => {
   return result.data;
 })();
 
+const depositInstructions = (() => {
+  let json: unknown;
+  try {
+    json = JSON.parse(env.DEPOSIT_INSTRUCTIONS_JSON);
+  } catch {
+    throw new ConfigError(['DEPOSIT_INSTRUCTIONS_JSON não é um JSON válido']);
+  }
+  const result = instructionsSchema.safeParse(json);
+  if (!result.success) {
+    throw new ConfigError(
+      result.error.issues.map(
+        (issue) => `DEPOSIT_INSTRUCTIONS_JSON[${issue.path.join('.')}]: ${issue.message}`,
+      ),
+    );
+  }
+  return result.data;
+})();
+
+const depositMethods = (() => {
+  const known = ['USDC', 'CARD', 'PIXQR', 'PIX', 'SEPA', 'MBWAY', 'REVOLUT'] as const;
+  const list = env.DEPOSIT_METHODS.split(',')
+    .map((m) => m.trim().toUpperCase())
+    .filter((m) => m.length > 0);
+
+  const unknown = list.filter((m) => !known.includes(m as (typeof known)[number]));
+  if (unknown.length > 0) {
+    throw new ConfigError([
+      `DEPOSIT_METHODS: trilho desconhecido ${unknown.join(', ')} (aceitos: ${known.join(', ')})`,
+    ]);
+  }
+  if (list.length === 0) {
+    throw new ConfigError(['DEPOSIT_METHODS: precisa de ao menos um trilho']);
+  }
+
+  /**
+   * Um trilho fiat sem `payTo` é uma página de checkout que pede dinheiro e
+   * não diz para onde mandar. Falha no boot, não no cliente.
+   */
+  const missing = list.filter(
+    (m) => m !== 'USDC' && m !== 'CARD' && m !== 'PIXQR' && !depositInstructions[m]?.payTo,
+  );
+  if (missing.length > 0) {
+    throw new ConfigError(
+      missing.map(
+        (m) =>
+          `DEPOSIT_INSTRUCTIONS_JSON: falta "${m}".payTo (chave Pix / IBAN / número) — ` +
+          `o trilho está em DEPOSIT_METHODS`,
+      ),
+    );
+  }
+
+  // Trilho do PSP sem credencial é um botão que leva a lugar nenhum.
+  if ((list.includes('CARD') || list.includes('PIXQR')) && !env.MERCADOPAGO_ACCESS_TOKEN) {
+    throw new ConfigError([
+      'MERCADOPAGO_ACCESS_TOKEN é obrigatória com CARD ou PIXQR em DEPOSIT_METHODS ' +
+        '(painel do Mercado Pago → Suas integrações → Credenciais)',
+    ]);
+  }
+
+  return [...new Set(list)] as Array<(typeof known)[number]>;
+})();
+
+/**
+ * Geração de carteira sem chave de cifra seria guardar chave privada de
+ * cliente em claro no banco. Falha no boot, não em runtime.
+ */
+const walletKey = env.WALLET_ENCRYPTION_KEY ?? '';
+if (env.WALLET_GENERATION && walletKey.length < 32) {
+  throw new ConfigError([
+    'WALLET_ENCRYPTION_KEY é obrigatória com WALLET_GENERATION=true e precisa de ' +
+      'ao menos 32 caracteres (gere com: npm run walletkey). Sem ela, as chaves ' +
+      'privadas dos clientes ficariam em claro no banco.',
+  ]);
+}
+
+/** Valida a carteira de gás no boot: endereço errado só apareceria na varredura. */
+const gasFeeWallet = (() => {
+  const raw = (env.GAS_FEE_WALLET ?? '').trim();
+  if (raw === '') return '';
+  try {
+    new PublicKey(raw);
+  } catch {
+    throw new ConfigError([`GAS_FEE_WALLET não é uma public key Solana válida: "${raw}"`]);
+  }
+  return raw;
+})();
+
+if (env.DEPOSIT_MIN_AMOUNT > env.DEPOSIT_MAX_AMOUNT) {
+  throw new ConfigError([
+    `DEPOSIT_MIN_AMOUNT (${env.DEPOSIT_MIN_AMOUNT}) não pode ser maior que ` +
+      `DEPOSIT_MAX_AMOUNT (${env.DEPOSIT_MAX_AMOUNT})`,
+  ]);
+}
+
 /**
  * Detecção de ambiente serverless.
  *
@@ -214,6 +418,23 @@ const isServerless =
   process.env.VERCEL === '1' ||
   process.env.AWS_LAMBDA_FUNCTION_NAME !== undefined ||
   process.env.FUNCTIONS_WORKER_RUNTIME !== undefined;
+
+/**
+ * Moeda de cada país do Mercado Pago.
+ *
+ * A conta só processa a moeda do próprio site: uma conta brasileira cobra em
+ * BRL e nada mais. Oferecer outra no checkout é vender algo que o PSP vai
+ * recusar depois de o cliente digitar o cartão.
+ */
+const MP_SITE_CURRENCY = {
+  MLB: 'BRL',
+  MLA: 'ARS',
+  MLM: 'MXN',
+  MLC: 'CLP',
+  MCO: 'COP',
+  MPE: 'PEN',
+  MLU: 'UYU',
+} as const;
 
 /** Mint nativo do SOL empacotado — output do swap no Jupiter. */
 export const SOL_MINT = 'So11111111111111111111111111111111111111112';
@@ -292,6 +513,8 @@ export const config = {
     maxAttempts: env.MAX_ATTEMPTS,
     depositWaitTimeoutMs: env.DEPOSIT_WAIT_TIMEOUT_MS,
     maxOrderInputRaw: BigInt(env.MAX_ORDER_INPUT_RAW),
+    networkCostLamports: BigInt(env.NETWORK_COST_LAMPORTS),
+    gasFeeWallet: gasFeeWallet,
     /** Kill switch: quando false, nenhuma etapa que move dinheiro executa. */
     allowPipeline,
     serverlessBudgetMs,
@@ -302,6 +525,45 @@ export const config = {
     depositWaitBudgetMs: isServerless
       ? Math.min(env.DEPOSIT_WAIT_TIMEOUT_MS, Math.floor(serverlessBudgetMs * 0.5))
       : env.DEPOSIT_WAIT_TIMEOUT_MS,
+  },
+
+  /**
+   * Provedor interno de depósitos: o caminho para receber dinheiro sem
+   * onboarding de on-ramp. Ver `deposit.service.ts` e README.
+   */
+  deposit: {
+    enabled: env.DEPOSIT_ENABLED,
+    methods: depositMethods,
+    instructions: depositInstructions,
+    minAmount: env.DEPOSIT_MIN_AMOUNT,
+    maxAmount: env.DEPOSIT_MAX_AMOUNT,
+    ttlMs: env.DEPOSIT_INTENT_TTL_MINUTES * 60_000,
+    autoConfirm: env.DEPOSIT_AUTOCONFIRM,
+    scanSignatures: env.DEPOSIT_SCAN_SIGNATURES,
+    maxIntentsPerHour: env.DEPOSIT_MAX_INTENTS_PER_HOUR,
+    requireFloat: env.DEPOSIT_REQUIRE_FLOAT,
+  },
+
+  /**
+   * Carteiras custodiadas. Ver `wallet.service.ts` — e a advertência sobre
+   * custódia no README antes de ligar isto em produção.
+   */
+  wallet: {
+    enabled: env.WALLET_GENERATION,
+    encryptionKey: walletKey,
+  },
+
+  /** Trilho de cartão. Vazio = desligado (e `CARD` não sobe em DEPOSIT_METHODS). */
+  mercadopago: {
+    accessToken: env.MERCADOPAGO_ACCESS_TOKEN ?? '',
+    publicKey: env.MERCADOPAGO_PUBLIC_KEY ?? '',
+    webhookSecret: env.MERCADOPAGO_WEBHOOK_SECRET ?? '',
+    sandbox: env.MERCADOPAGO_SANDBOX,
+    base: env.MERCADOPAGO_API_BASE,
+    publicBaseUrl: env.PUBLIC_BASE_URL ?? '',
+    site: env.MERCADOPAGO_SITE,
+    /** Moeda que a conta processa. Cobrar em outra é recusa garantida. */
+    currency: MP_SITE_CURRENCY[env.MERCADOPAGO_SITE],
   },
 
   feeProviders: {

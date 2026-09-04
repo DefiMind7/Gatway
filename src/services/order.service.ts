@@ -4,6 +4,7 @@ import { prisma } from '../database/client';
 import {
   GatewayError,
   OrderStatus,
+  type EffectiveFee,
   type FiatCurrency,
   type NormalizedFiatEvent,
 } from '../types';
@@ -61,6 +62,20 @@ export interface CreateOrderResult {
 
 export async function createOrderFromEvent(
   event: NormalizedFiatEvent,
+  opts: {
+    /**
+     * Taxa já resolvida. O provedor interno passa a sua (margem, sem custo de
+     * on-ramp — ver `resolveInternalFee`); sem isto a ordem seria cobrada com
+     * o custo de um on-ramp que não participou da operação.
+     */
+    fee?: EffectiveFee;
+    /**
+     * Parte do pagamento que ficou em FIAT e não foi convertida (modelo
+     * cartão). Gravada na ordem porque é a receita dela: sem isto, uma ordem
+     * de 100 BRL que converteu 70 pareceria ter cobrado zero.
+     */
+    retained?: { bps: number; amount: string };
+  } = {},
 ): Promise<CreateOrderResult> {
   const existing = await prisma.order.findUnique({ where: { providerEventId: event.eventId } });
   if (existing) {
@@ -89,10 +104,9 @@ export async function createOrderFromEvent(
   }
 
   // Taxa em tempo real: custo do melhor on-ramp + margem, snapshot na ordem.
-  const fee = await resolveEffectiveFee(
-    event.fiatCurrency as FiatCurrency,
-    Number(event.fiatAmount),
-  );
+  const fee =
+    opts.fee ??
+    (await resolveEffectiveFee(event.fiatCurrency as FiatCurrency, Number(event.fiatAmount)));
 
   try {
     const order = await prisma.order.create({
@@ -111,6 +125,12 @@ export async function createOrderFromEvent(
         marginBps: fee.marginBps,
         feeBps: fee.feeBps,
         feeSourceProvider: fee.sourceProvider,
+        ...(opts.retained !== undefined
+          ? {
+              fiatRetainedBps: opts.retained.bps,
+              retainedFiatAmount: new Prisma.Decimal(opts.retained.amount),
+            }
+          : {}),
         status: OrderStatus.PENDING,
       },
     });
@@ -122,6 +142,7 @@ export async function createOrderFromEvent(
         customerWallet: event.customerWallet,
         feeBps: fee.feeBps,
         feeSource: fee.sourceProvider,
+        ...(opts.retained !== undefined ? { retainedFiat: opts.retained.amount } : {}),
       },
       'ordem criada',
     );
@@ -256,16 +277,41 @@ async function stepSettleCustomer(order: Order): Promise<Order> {
   }
 
   const total = order.solReceivedLamports;
+
+  /**
+   * O custo de rede é do cliente.
+   *
+   * Descontamos dele o suficiente para cobrir swap e liquidação, e esse valor
+   * FICA no vault como reembolso — não entra no lucro distribuível. Sem essa
+   * separação, o rateio entre sócios levaria embora o saldo que paga as taxas
+   * das próximas ordens, e o vault secaria sozinho conforme o volume subisse.
+   */
+  const networkCost = order.networkCostLamports ?? config.runtime.networkCostLamports;
+  const gross = (total * BigInt(TOTAL_BPS - order.feeBps)) / BigInt(TOTAL_BPS);
+
   // Fixa o valor do cliente na primeira passagem; um retry reusa o mesmo
   // número para não pagar diferente do que foi contabilizado.
   const customerLamports =
-    order.customerLamports ?? (total * BigInt(TOTAL_BPS - order.feeBps)) / BigInt(TOTAL_BPS);
-  const profitLamports = total - customerLamports;
+    order.customerLamports ?? (gross > networkCost ? gross - networkCost : 0n);
+
+  if (customerLamports < config.distribution.minTransferLamports) {
+    // Depósito pequeno demais: o que sobraria não paga nem a conta na rede.
+    // Falhar aqui é melhor do que queimar a taxa numa transferência inútil.
+    throw new GatewayError(
+      `valor liquidado (${customerLamports} lamports) ficou abaixo do mínimo transferível ` +
+        `(${config.distribution.minTransferLamports}) depois do custo de rede`,
+      'BELOW_MIN_TRANSFER',
+      false,
+    );
+  }
+
+  const rawProfit = total - customerLamports - networkCost;
+  const profitLamports = rawProfit > 0n ? rawProfit : 0n;
 
   if (order.customerLamports === null) {
     await prisma.order.update({
       where: { id: order.id },
-      data: { customerLamports, profitLamports },
+      data: { customerLamports, profitLamports, networkCostLamports: networkCost },
     });
   }
 
@@ -294,6 +340,7 @@ async function stepSettleCustomer(order: Order): Promise<Order> {
       customerPayoutSignature: signature,
       customerLamports,
       profitLamports,
+      networkCostLamports: networkCost,
       settledAt: new Date(),
       lastError: null,
     },
@@ -301,6 +348,20 @@ async function stepSettleCustomer(order: Order): Promise<Order> {
 }
 
 // ─────────────────── Loop da máquina de estados ───────────────────
+
+/**
+ * Erros que significam "ainda não chegou", não "deu errado".
+ *
+ * No modelo de conversão manual, uma ordem paga espera o operador comprar o
+ * USDC e abastecer o vault — o que pode levar horas. Contar essa espera como
+ * tentativa mataria a ordem em minutos (3 tentativas × cron de 5 min), com o
+ * dinheiro do cliente já recebido. Espera não gasta tentativa.
+ */
+const WAITING_CODES = new Set(['DEPOSIT_NOT_COVERED', 'DEPOSIT_TIMEOUT']);
+
+function isWaiting(err: unknown): boolean {
+  return err instanceof GatewayError && WAITING_CODES.has(err.code);
+}
 
 async function markFailed(orderId: string, err: unknown): Promise<void> {
   const message = err instanceof Error ? err.message : String(err);
@@ -367,6 +428,31 @@ async function processOrderLocked(orderId: string): Promise<void> {
       );
     }
 
+    /**
+     * Verifica o lastro ANTES de mover a ordem para PROCESSING.
+     *
+     * Sem isto, toda ordem sem float passava por PROCESSING antes de falhar na
+     * espera — e um restart nesse intervalo a deixava indistinguível de uma
+     * ordem com swap em voo. Marcar a espera antes mantém o estado honesto.
+     */
+    if (order.status !== OrderStatus.SWAPPED) {
+      const available = await getTokenBalanceRaw(order.inputMint).catch(() => 0n);
+      const committed = await committedInputRaw(order.inputMint, order);
+      if (available - committed < order.inputAmountRaw) {
+        await prisma.order.update({
+          where: { id: orderId },
+          data: {
+            status: OrderStatus.PENDING,
+            lastError:
+              'AGUARDANDO_LASTRO: pagamento recebido; a entrega acontece assim que houver ' +
+              'stablecoin no vault. Esta espera não consome tentativas.',
+          },
+        });
+        orderLogger(orderId).info('sem lastro no vault — ordem aguardando');
+        return;
+      }
+    }
+
     order = await prisma.order.update({
       where: { id: orderId },
       data: {
@@ -392,6 +478,31 @@ async function processOrderLocked(orderId: string): Promise<void> {
     const retryable = err instanceof GatewayError ? err.retryable : true;
     const order = await prisma.order.findUnique({ where: { id: orderId } });
     const attempts = order?.attempts ?? config.runtime.maxAttempts;
+
+    /**
+     * Espera pelo lastro: devolve a tentativa e mantém a ordem viva.
+     *
+     * A ordem volta para PENDING com uma mensagem que descreve o estado real
+     * — o cliente pagou, o dinheiro está com o operador, e a entrega acontece
+     * assim que o vault for abastecido.
+     */
+    if (isWaiting(err)) {
+      await prisma.order.update({
+        where: { id: orderId },
+        data: {
+          status: OrderStatus.PENDING,
+          attempts: { decrement: 1 },
+          lastError:
+            'AGUARDANDO_LASTRO: pagamento recebido; a entrega acontece assim que houver ' +
+            'stablecoin no vault. Esta espera não consome tentativas.',
+        },
+      });
+      orderLogger(orderId).warn(
+        { code: err instanceof GatewayError ? err.code : 'UNKNOWN' },
+        'ordem aguardando lastro no vault — tentativa devolvida',
+      );
+      return;
+    }
 
     if (!retryable || attempts >= config.runtime.maxAttempts) {
       await markFailed(orderId, err);
@@ -454,7 +565,28 @@ export async function retryPendingOrders(
     }
     if (order.status === OrderStatus.PROCESSING && order.swapSignature === null) {
       const tokenBalance = await getTokenBalanceRaw(order.inputMint).catch(() => 0n);
+
       if (tokenBalance < order.inputAmountRaw) {
+        /**
+         * Distinguir "swap possivelmente em voo" de "esperando lastro".
+         *
+         * A trava abaixo existe para o processo que morreu no meio de um swap:
+         * retomar às cegas poderia swapar duas vezes. Mas uma ordem cuja última
+         * anotação é AGUARDANDO_LASTRO nunca passou da verificação de saldo —
+         * nenhum swap foi montado, quanto mais transmitido. Tratá-la como
+         * suspeita mataria exatamente as ordens que o modelo de conversão
+         * manual mantém em espera legítima.
+         */
+        const waitingForFloat = (order.lastError ?? '').startsWith('AGUARDANDO_LASTRO');
+
+        if (waitingForFloat) {
+          await prisma.order.update({
+            where: { id: order.id },
+            data: { status: OrderStatus.PENDING },
+          });
+          continue;
+        }
+
         await prisma.order.update({
           where: { id: order.id },
           data: {
@@ -476,7 +608,95 @@ export async function retryPendingOrders(
   return { found: orders.length, processed, budgetExhausted: false };
 }
 
+/**
+ * Dispara a pipeline respeitando as regras do runtime.
+ *
+ * Em serverless não há "depois da resposta": a função pode ser congelada ou
+ * morta, então `setImmediate` não garante execução nenhuma — o trabalho tem de
+ * caber ANTES do `res.end()`, com teto para não estourar o `maxDuration`. Num
+ * host persistente o background é real e a resposta sai na hora.
+ *
+ * O que não terminar dentro do orçamento não se perde: fica no estado
+ * persistido e o próximo tick do cron retoma.
+ */
+export async function dispatchOrderPipeline(
+  orderId: string,
+): Promise<{ inline: boolean; timedOut: boolean; elapsedMs: number }> {
+  const startedAt = Date.now();
+
+  if (!config.isServerless) {
+    setImmediate(() => {
+      void processOrder(orderId).catch((err: unknown) =>
+        orderLogger(orderId).error({ err }, 'processOrder estourou fora do handler'),
+      );
+    });
+    return { inline: false, timedOut: false, elapsedMs: 0 };
+  }
+
+  let timedOut = false;
+  await Promise.race([
+    processOrder(orderId).catch((err: unknown) =>
+      orderLogger(orderId).error({ err }, 'processOrder falhou'),
+    ),
+    new Promise<void>((resolve) =>
+      setTimeout(() => {
+        timedOut = true;
+        resolve();
+      }, config.runtime.serverlessBudgetMs),
+    ),
+  ]);
+
+  return { inline: true, timedOut, elapsedMs: Date.now() - startedAt };
+}
+
 // ─────────────────────────── Consultas ───────────────────────────
+
+/**
+ * Ordens pagas que ainda não foram entregues — a fila de conversão manual.
+ *
+ * É o que o operador precisa saber para agir: quanto de USDC comprar e para
+ * quantos clientes. Sem esta visão, "o cliente pagou e não recebeu" só
+ * apareceria por reclamação.
+ */
+export async function getPendingDelivery(): Promise<{
+  count: number;
+  requiredRaw: bigint;
+  oldestAt: string | null;
+  orders: Array<{
+    id: string;
+    fiat: string;
+    usdcNeeded: string;
+    customerWallet: string;
+    waitingSince: string;
+    lastError: string | null;
+  }>;
+}> {
+  const orders = await prisma.order.findMany({
+    where: {
+      status: { in: [OrderStatus.PENDING, OrderStatus.PROCESSING] },
+      swapSignature: null,
+    },
+    orderBy: { createdAt: 'asc' },
+    take: 100,
+  });
+
+  const decimals = config.swap.inputMintDecimals;
+  const requiredRaw = orders.reduce((acc, o) => acc + o.inputAmountRaw, 0n);
+
+  return {
+    count: orders.length,
+    requiredRaw,
+    oldestAt: orders[0]?.createdAt.toISOString() ?? null,
+    orders: orders.map((o) => ({
+      id: o.id,
+      fiat: `${o.fiatAmount.toString()} ${o.fiatCurrency}`,
+      usdcNeeded: (Number(o.inputAmountRaw) / 10 ** decimals).toFixed(2),
+      customerWallet: o.customerWallet,
+      waitingSince: o.createdAt.toISOString(),
+      lastError: o.lastError,
+    })),
+  };
+}
 
 /** Snapshot de contagem por status — usado pelo /health e pelo admin. */
 export async function getOrderStats(): Promise<Record<string, number>> {

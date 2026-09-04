@@ -125,6 +125,51 @@ docker run -p 3000:3000 --env-file .env solana-fiat-gateway
 
 ---
 
+## Depósitos: checar antes de mandar a primeira pessoa pagar
+
+O checkout público (`/pay`) é a porta de entrada do dinheiro. Ver README,
+seção "Receber dinheiro hoje". No deploy, três coisas mudam de figura:
+
+1. **Vercel Cron é diário no plano gratuito.** A varredura on-chain e a
+   retomada de ordens não podem depender só dele — e não dependem: o poll da
+   página do cliente dispara as duas (throttlado por lock no banco). Se o
+   cliente fechar a aba antes de a ordem liquidar, ela fica para o próximo
+   tick. Num host persistente isso não se aplica: o agendador roda a cada 5 min.
+2. **`DEPOSIT_MAX_AMOUNT` é o seu limite de exposição**, não um detalhe de UX.
+   Cada ordem confirmada consome USDC do vault.
+3. **Trilho fiat exige float de USDC no vault** antes de confirmar qualquer
+   coisa. Sem saldo, a ordem fica em `DEPOSIT_NOT_COVERED` com o cliente já
+   tendo pago. O painel mostra o float na visão geral.
+
+Com o trilho `CARD` há mais uma coisa a fazer no deploy: definir
+`PUBLIC_BASE_URL` e cadastrar `https://SEU-DEPLOY/pay/mercadopago/webhook` no
+painel do Mercado Pago (Suas integrações → Webhooks), copiando o segredo para
+`MERCADOPAGO_WEBHOOK_SECRET`. Sem o segredo o webhook é **recusado em
+produção** — mas a confirmação continua acontecendo pela consulta ativa, então
+um webhook mal configurado atrasa, não perde.
+
+Variáveis novas: `DEPOSIT_ENABLED`, `DEPOSIT_METHODS`,
+`DEPOSIT_INSTRUCTIONS_JSON`, `DEPOSIT_MIN_AMOUNT`, `DEPOSIT_MAX_AMOUNT`,
+`DEPOSIT_INTENT_TTL_MINUTES`, `DEPOSIT_AUTOCONFIRM`, `DEPOSIT_SCAN_SIGNATURES`,
+`DEPOSIT_MAX_INTENTS_PER_HOUR`, `MERCADOPAGO_ACCESS_TOKEN`,
+`MERCADOPAGO_WEBHOOK_SECRET`, `MERCADOPAGO_SANDBOX`, `PUBLIC_BASE_URL`. As de
+depósito são opcionais — o default é o trilho USDC
+ligado, 5..500 por depósito. `scripts/vercel-env.js` já as envia.
+
+Depois do deploy rode `prisma db push` (ou uma migration) contra o Postgres:
+as tabelas `DepositIntent` e `CustomerWallet` são novas.
+
+**`WALLET_ENCRYPTION_KEY` no deploy merece atenção especial.** Ela cifra as
+chaves privadas dos clientes. Se o valor no deploy for diferente do valor com
+que as carteiras foram criadas, o app **não sobe** (a verificação de boot pega
+isso) — e se subisse, seria pior: os clientes não teriam mais acesso ao dinheiro
+deles. Use o mesmo valor em todos os ambientes que compartilham o banco, e
+guarde uma cópia fora da plataforma.
+
+Antes de abrir para clientes, rode `npm run preflight` **apontando para as
+variáveis de produção**. Ele confere rede, float, credencial do PSP e limites, e
+sai com código 1 se algo faltar.
+
 ## Variáveis de ambiente
 
 Obrigatórias em qualquer host:

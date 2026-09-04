@@ -359,6 +359,41 @@ export async function resolveEffectiveFee(
   };
 }
 
+/**
+ * Taxa de um depósito pelo provedor INTERNO.
+ *
+ * Aqui não existe on-ramp para pagar: quem recebe o fiat (ou o USDC) é o
+ * próprio operador, então `providerCostBps = 0` e o cliente paga só a margem.
+ * Cobrar o custo de um MoonPay que não participou da operação seria inflar a
+ * taxa sem contrapartida.
+ *
+ * O clamp por `minFeeBps`/`maxFeeBps` continua valendo — é o mesmo teto de
+ * sanidade, e o piso garante que a operação não saia de graça mesmo com
+ * `marginBps = 0`.
+ */
+export async function resolveInternalFee(): Promise<EffectiveFee> {
+  const settings = await getSettings();
+
+  const raw = settings.marginBps;
+  const feeBps = Math.min(Math.max(raw, settings.minFeeBps), settings.maxFeeBps);
+
+  if (feeBps >= TOTAL_BPS) {
+    throw new GatewayError(
+      `taxa efetiva de ${feeBps}bps é >= 100% — configuração inválida`,
+      'INVALID_FEE',
+      false,
+    );
+  }
+
+  return {
+    providerCostBps: 0,
+    marginBps: settings.marginBps,
+    feeBps,
+    sourceProvider: 'internal',
+    clamped: feeBps !== raw,
+  };
+}
+
 /** Snapshots recentes para o painel do admin. */
 export async function recentFeeSnapshots(limit = 40): Promise<
   Array<{

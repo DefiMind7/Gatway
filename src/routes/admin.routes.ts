@@ -6,9 +6,31 @@ import { GatewayError, SUPPORTED_CURRENCIES, type FiatCurrency as Fiat } from '.
 import { logger } from '../utils/logger';
 import { jsonSafe } from '../utils/serialize';
 import { previewSplit } from '../services/distribution.service';
+import {
+  cancelIntent,
+  confirmIntent,
+  expireStaleIntents,
+  getCheckoutOptions,
+  getFloatStatus,
+  getRetainedFiatTotals,
+  listIntents,
+} from '../services/deposit.service';
+import { scanOnchainDeposits } from '../services/deposit-watch.service';
+import { getGasSweepStatus, sweepGasFees } from '../services/gas.service';
+import { findOrphanPayments, reconcilePspPayments } from '../services/reconcile.service';
+import {
+  reopenOrder,
+  settleManually,
+  undoManualSettlement,
+} from '../services/manual-settle.service';
 import { adapterStatus, compareProviderFees, recentFeeSnapshots, resolveEffectiveFee } from '../services/fee.service';
 import { listLocks, pruneExpiredLocks } from '../services/lock.service';
-import { getAccruedProfit, getOrderStats, retryPendingOrders } from '../services/order.service';
+import {
+  getAccruedProfit,
+  getOrderStats,
+  getPendingDelivery,
+  retryPendingOrders,
+} from '../services/order.service';
 import {
   hasPartialRuns,
   listRuns,
@@ -24,7 +46,7 @@ import {
   type RecipientInput,
   type SettingsPatch,
 } from '../services/settings.service';
-import { getBalance, lamportsToSol } from '../services/solana.service';
+import { getBalance, getTokenBalanceRaw, lamportsToSol } from '../services/solana.service';
 import { ADMIN_PAGE_HTML } from './admin.page';
 import { ah } from '../utils/async-route';
 
@@ -66,7 +88,21 @@ function requireAdmin(req: Request, res: Response, next: NextFunction): void {
   const ip = req.ip ?? 'unknown';
   const record = failures.get(ip);
   if (record && Date.now() - record.first < LOCKOUT_WINDOW_MS && record.count >= MAX_FAILURES) {
-    res.status(429).json({ error: 'too_many_attempts', message: 'tente novamente mais tarde' });
+    /**
+     * Diz quanto falta. "Tente novamente mais tarde", sem prazo, é
+     * indistinguível de "quebrou" — e quem mais vê essa tela é o próprio
+     * operador, depois de errar a senha algumas vezes ou de trocá-la.
+     */
+    const restaSegundos = Math.ceil((LOCKOUT_WINDOW_MS - (Date.now() - record.first)) / 1_000);
+    const minutos = Math.ceil(restaSegundos / 60);
+
+    res.status(429).json({
+      error: 'too_many_attempts',
+      message:
+        `muitas tentativas incorretas deste IP — espere ${minutos} minuto(s) ` +
+        '(ou reinicie o servidor, que zera a contagem)',
+      retryAfterSeconds: restaSegundos,
+    });
     return;
   }
 
@@ -114,13 +150,29 @@ router.use('/api', requireAdmin);
 // ─────────────────────────── Visão geral ───────────────────────────
 
 router.get('/api/overview', ah(async (_req: Request, res: Response) => {
-  const [stats, profit, settings, vaultLamports, partial] = await Promise.all([
-    getOrderStats(),
-    getAccruedProfit(),
-    getSettingsView(),
-    getBalance().catch(() => null),
-    hasPartialRuns(),
+  const [stats, profit, settings, vaultLamports, partial, awaiting, awaitingActive, usdcFloat] =
+    await Promise.all([
+      getOrderStats(),
+      getAccruedProfit(),
+      getSettingsView(),
+      getBalance().catch(() => null),
+      hasPartialRuns(),
+      prisma.depositIntent.count({ where: { status: 'AWAITING_PAYMENT' } }),
+      prisma.depositIntent.count({
+        where: { status: 'AWAITING_PAYMENT', expiresAt: { gt: new Date() } },
+      }),
+      getTokenBalanceRaw(config.swap.inputMint).catch(() => null),
+    ]);
+
+  const [retained, float, pending, gas, orphans] = await Promise.all([
+    getRetainedFiatTotals(),
+    getFloatStatus(),
+    getPendingDelivery(),
+    getGasSweepStatus(),
+    // Falha do PSP não pode derrubar a visão geral inteira.
+    findOrphanPayments().catch(() => []),
   ]);
+  const decimals = config.swap.inputMintDecimals;
 
   res.json({
     orders: stats,
@@ -143,6 +195,59 @@ router.get('/api/overview', ah(async (_req: Request, res: Response) => {
       nextRunAt: getNextRunAt()?.toISOString() ?? settings.nextRunAt,
       minProfitSol: Number(settings.minProfitLamports) / LAMPORTS_PER_SOL,
     },
+    deposits: {
+      awaiting,
+      /** Só as que ainda podem ser pagas — o resto é histórico. */
+      awaitingActive,
+      checkoutUrl: '/pay',
+      methods: config.deposit.methods,
+      autoConfirm: config.deposit.autoConfirm,
+      /**
+       * Float de stablecoin no vault. É o que lastreia os trilhos fiat: sem
+       * ele, uma confirmação manual gera ordem que fica em DEPOSIT_NOT_COVERED.
+       */
+      usdcFloat:
+        usdcFloat === null
+          ? null
+          : Number(usdcFloat) / 10 ** config.swap.inputMintDecimals,
+      /**
+       * Receita retida em fiat — o dinheiro que ficou na conta do PSP/banco.
+       * Não está na chain e não entra em `PayoutRun`: a divisão entre sócios
+       * dessa parte é transferência bancária, feita por fora.
+       */
+      retainedFiat: retained,
+      /**
+       * Float livre: o que ainda dá para vender. Com `requireFloat` ligado,
+       * é o teto real de quanto os clientes conseguem depositar agora.
+       */
+      floatAvailable: Number(float.availableRaw) / 10 ** decimals,
+      floatCommitted: Number(float.committedRaw) / 10 ** decimals,
+      requireFloat: config.deposit.requireFloat,
+      /**
+       * Clientes que já pagaram e ainda não receberam. No modelo de conversão
+       * manual esta é a fila que o operador precisa zerar: `usdcNeeded` é
+       * exatamente quanto comprar e mandar para o vault.
+       */
+      pendingDelivery: {
+        count: pending.count,
+        usdcNeeded: Number(pending.requiredRaw) / 10 ** decimals,
+        oldestAt: pending.oldestAt,
+        orders: pending.orders,
+      },
+    },
+    gas: {
+      wallet: gas.wallet,
+      accruedSol: Number(gas.accruedLamports) / LAMPORTS_PER_SOL,
+      sweepableSol: Number(gas.sweepableLamports) / LAMPORTS_PER_SOL,
+      orderCount: gas.orderCount,
+      limitedBy: gas.limitedBy,
+    },
+    /**
+     * Dinheiro que entrou na conta do PSP e não bate com nenhuma ordem. É a
+     * checagem que fecha o ciclo: todo pagamento aprovado ou virou ordem, ou
+     * aparece aqui.
+     */
+    orphanPayments: orphans,
     warnings: {
       partialRuns: partial,
       vaultBelowReserve:
@@ -325,6 +430,27 @@ router.all('/cron/tick', ah(async (req: Request, res: Response) => {
     steps.resumeIncompleteRuns = err instanceof Error ? err.message : String(err);
   }
 
+  // Depósitos antes das ordens: uma varredura que confirma um depósito agora
+  // gera a ordem que o passo seguinte já processa, no mesmo tick.
+  try {
+    // Primeiro o PSP: é o caminho que não depende de webhook nem de navegador.
+    steps.pspReconcile = await reconcilePspPayments();
+  } catch (err) {
+    steps.pspReconcile = err instanceof Error ? err.message : String(err);
+  }
+
+  try {
+    steps.expiredIntents = await expireStaleIntents();
+  } catch (err) {
+    steps.expiredIntents = err instanceof Error ? err.message : String(err);
+  }
+
+  try {
+    steps.depositScan = await scanOnchainDeposits();
+  } catch (err) {
+    steps.depositScan = err instanceof Error ? err.message : String(err);
+  }
+
   try {
     const processed = await retryPendingOrders({ budgetMs: budget - (Date.now() - startedAt) });
     steps.retryPendingOrders = processed;
@@ -367,8 +493,151 @@ router.post('/api/distribution/run-now', ah(async (req: Request, res: Response) 
   res.json(summary);
 }));
 
+// ─────────────────────── Depósitos (provedor interno) ───────────────────────
+
+/**
+ * A fila do operador. É esta tela que faz o trilho manual funcionar: o
+ * dinheiro cai no banco, o operador confere o extrato e confirma aqui.
+ */
+router.get('/api/deposits', ah(async (req: Request, res: Response) => {
+  // `options` acompanha a fila porque o painel precisa saber a retenção
+  // vigente para explicar os números da tabela.
+  const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+  const limit = Number(req.query.limit ?? 30);
+
+  const [intents, options, settings] = await Promise.all([
+    listIntents({ ...(status ? { status } : {}), limit }),
+    getCheckoutOptions(),
+    getSettingsView(),
+  ]);
+
+  // A precificação vem daqui, e não do payload público — que deixou de
+  // carregá-la de propósito.
+  res.json({
+    intents,
+    options: {
+      ...options,
+      fiatRetainedBps: settings.fiatRetainedBps,
+      depositRates: settings.depositRates,
+    },
+  });
+}));
+
+/**
+ * Confirma um depósito.
+ *
+ * **É o clique que move dinheiro**: a partir daqui a pipeline compra SOL com
+ * USDC do vault e envia para a carteira do cliente. Num trilho fiat, confirmar
+ * sem o dinheiro ter caído é uma perda real — o gateway não tem como verificar
+ * o extrato bancário do operador.
+ */
+router.post('/api/deposits/:reference/confirm', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { note?: string; depositSignature?: string; force?: boolean };
+  const reference = String(req.params.reference ?? '');
+
+  log.warn({ reference, force: Boolean(body.force) }, 'confirmação manual de depósito');
+
+  const result = await confirmIntent(reference, {
+    confirmedBy: 'admin',
+    note: body.note,
+    depositSignature: body.depositSignature,
+    force: Boolean(body.force),
+  });
+
+  res.json(
+    jsonSafe({
+      reference: result.intent.reference,
+      orderId: result.orderId,
+      orderCreated: result.created,
+      pipeline: result.pipeline,
+    }),
+  );
+}));
+
+router.post('/api/deposits/:reference/cancel', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { note?: string };
+  const intent = await cancelIntent(String(req.params.reference ?? ''), body.note);
+  res.json({ reference: intent.reference, status: intent.status });
+}));
+
+/** Varredura on-chain sob demanda — o mesmo motor que o cron e o poll usam. */
+router.post('/api/deposits/scan', ah(async (_req: Request, res: Response) => {
+  res.json(await scanOnchainDeposits());
+}));
+
+/** Pergunta ao PSP por todas as intenções em aberto, agora. */
+router.post('/api/deposits/reconcile', ah(async (_req: Request, res: Response) => {
+  res.json(await reconcilePspPayments());
+}));
+
+// ─────────────────────────── Taxas de gás ───────────────────────────
+
+/**
+ * Varre as taxas de gás acumuladas para `GAS_FEE_WALLET`.
+ *
+ * Move dinheiro: respeita a reserva de operação do vault e o lucro que ainda
+ * pertence ao rateio dos sócios. O que sai é só o excedente.
+ */
+router.post('/api/gas/sweep', ah(async (_req: Request, res: Response) => {
+  const result = await sweepGasFees();
+  log.warn({ sol: result.sol, orders: result.orderCount }, 'varredura de gás disparada pelo admin');
+  res.json(jsonSafe(result));
+}));
+
 // ─────────────────────────── Ordens ───────────────────────────
 
+/**
+ * Retoma as ordens paradas agora, sem esperar o tick.
+ *
+ * É o botão que o operador aperta depois de abastecer o vault: a fila de
+ * entrega esvazia em segundos em vez de até cinco minutos.
+ */
+router.post('/api/orders/retry', ah(async (_req: Request, res: Response) => {
+  res.json(await retryPendingOrders({ budgetMs: config.runtime.serverlessBudgetMs }));
+}));
+
+/**
+ * Registra que o operador entregou o SOL por fora.
+ *
+ * Fecha a ordem sem passar pela pipeline. A assinatura é conferida na rede —
+ * tem de existir, ter sucesso e ter creditado a carteira daquela ordem. Sem
+ * assinatura, só com `withoutProof` explícito, e o registro fica marcado como
+ * não verificado.
+ */
+router.post('/api/orders/:id/settle', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { signature?: string; note?: string; withoutProof?: boolean };
+
+  const result = await settleManually({
+    orderId: String(req.params.id ?? ''),
+    signature: body.signature,
+    note: body.note,
+    withoutProof: body.withoutProof === true,
+    actor: 'admin',
+  });
+
+  log.warn({ orderId: result.orderId, verified: result.verified }, 'liquidação manual registrada');
+  res.json(jsonSafe(result));
+}));
+
+/** Devolve uma ordem FAILED para a fila, se for seguro. */
+router.post('/api/orders/:id/reopen', ah(async (req: Request, res: Response) => {
+  res.json(await reopenOrder(String(req.params.id ?? ''), 'admin'));
+}));
+
+/** Desfaz um registro manual feito por engano. */
+router.post('/api/orders/:id/settle/undo', ah(async (req: Request, res: Response) => {
+  await undoManualSettlement(String(req.params.id ?? ''));
+  res.json({ ok: true });
+}));
+
+/**
+ * Livro-razão das ordens.
+ *
+ * Cada linha responde às perguntas que o operador faz às três da manhã: quem
+ * pagou, quanto, **para qual carteira foi**, quanto ficou em fiat, e onde está
+ * a prova on-chain. Sem a carteira de destino aqui, "para onde foi o dinheiro"
+ * só teria resposta consultando o banco à mão.
+ */
 router.get('/api/orders', ah(async (req: Request, res: Response) => {
   const limit = Math.min(Math.max(Number(req.query.limit ?? 25), 1), 100);
   const status = typeof req.query.status === 'string' ? req.query.status : undefined;
@@ -379,24 +648,65 @@ router.get('/api/orders', ah(async (req: Request, res: Response) => {
     take: limit,
   });
 
+  // A intenção carrega a referência e o trilho; a conta, o e-mail. Duas
+  // consultas em lote em vez de N — a tabela precisa abrir rápido.
+  const [intents, wallets] = await Promise.all([
+    prisma.depositIntent.findMany({
+      where: { orderId: { in: orders.map((o) => o.id) } },
+      select: {
+        orderId: true,
+        reference: true,
+        method: true,
+        pspPaymentId: true,
+        customer: { select: { email: true } },
+      },
+    }),
+    prisma.customerWallet.findMany({
+      where: { publicKey: { in: orders.map((o) => o.customerWallet) } },
+      select: { publicKey: true, revealedAt: true, customer: { select: { email: true } } },
+    }),
+  ]);
+
+  const byOrder = new Map(intents.map((i) => [i.orderId, i]));
+  const byWallet = new Map(wallets.map((w) => [w.publicKey, w]));
+
   res.json(
     jsonSafe({
-      orders: orders.map((o) => ({
-        id: o.id,
-        status: o.status,
-        fiat: `${o.fiatAmount.toString()} ${o.fiatCurrency}`,
-        customerWallet: o.customerWallet,
-        feeBps: o.feeBps,
-        feeSourceProvider: o.feeSourceProvider,
-        customerSol: o.customerLamports === null ? null : Number(o.customerLamports) / LAMPORTS_PER_SOL,
-        profitSol: o.profitLamports === null ? null : Number(o.profitLamports) / LAMPORTS_PER_SOL,
-        swapSignature: o.swapSignature,
-        customerPayoutSignature: o.customerPayoutSignature,
-        payoutRunId: o.payoutRunId,
-        attempts: o.attempts,
-        lastError: o.lastError,
-        createdAt: o.createdAt.toISOString(),
-      })),
+      orders: orders.map((o) => {
+        const intent = byOrder.get(o.id);
+        const wallet = byWallet.get(o.customerWallet);
+        return {
+          id: o.id,
+          reference: intent?.reference ?? null,
+          method: intent?.method ?? o.provider,
+          pspPaymentId: intent?.pspPaymentId ?? o.providerPaymentId,
+          customerEmail: intent?.customer?.email ?? wallet?.customer?.email ?? null,
+          status: o.status,
+          fiat: `${o.fiatAmount.toString()} ${o.fiatCurrency}`,
+          retainedFiat: o.retainedFiatAmount?.toString() ?? null,
+          /** Para onde o SOL foi (ou vai). */
+          customerWallet: o.customerWallet,
+          /** true = carteira gerada por nós; a chave é nossa até ele exportar. */
+          custodial: wallet !== undefined,
+          keyExported: wallet?.revealedAt !== null && wallet?.revealedAt !== undefined,
+          feeBps: o.feeBps,
+          feeSourceProvider: o.feeSourceProvider,
+          customerSol: o.customerLamports === null ? null : Number(o.customerLamports) / LAMPORTS_PER_SOL,
+          profitSol: o.profitLamports === null ? null : Number(o.profitLamports) / LAMPORTS_PER_SOL,
+          networkCostSol:
+            o.networkCostLamports === null ? null : Number(o.networkCostLamports) / LAMPORTS_PER_SOL,
+          swapSignature: o.swapSignature,
+          customerPayoutSignature: o.customerPayoutSignature,
+          payoutRunId: o.payoutRunId,
+          attempts: o.attempts,
+          lastError: o.lastError,
+          manualSettlement: o.manualSettlement,
+          settledBy: o.settledBy,
+          settlementNote: o.settlementNote,
+          createdAt: o.createdAt.toISOString(),
+          settledAt: o.settledAt?.toISOString() ?? null,
+        };
+      }),
     }),
   );
 }));

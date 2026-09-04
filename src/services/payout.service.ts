@@ -103,11 +103,35 @@ async function runProfitDistributionLocked(options: RunOptions): Promise<RunSumm
     const settings = await getSettings();
 
     // 1) Pool elegível: ordens liquidadas cujo lucro ainda não saiu.
-    const eligible = await prisma.order.findMany({
+    const settled = await prisma.order.findMany({
       where: { status: OrderStatus.SETTLED, payoutRunId: null },
       select: { id: true, profitLamports: true },
       orderBy: { settledAt: 'asc' },
     });
+
+    /**
+     * Ordens sem lucro on-chain são encerradas aqui, fora do pool.
+     *
+     * São as do modelo cartão: a receita delas ficou em FIAT na conta do
+     * operador, não em lamports no vault. Sem isto ficariam em SETTLED para
+     * sempre — o painel mostraria uma fila de ordens "aguardando distribuição"
+     * que nunca teriam o que distribuir. Também não podem entrar num
+     * `PayoutRun`: inflariam a contagem de uma execução para a qual não
+     * contribuíram com um lamport.
+     */
+    const zeroProfit = settled.filter((o) => (o.profitLamports ?? 0n) === 0n);
+    if (zeroProfit.length > 0) {
+      await prisma.order.updateMany({
+        where: { id: { in: zeroProfit.map((o) => o.id) } },
+        data: { status: OrderStatus.DISTRIBUTED, distributedAt: new Date() },
+      });
+      log.info(
+        { count: zeroProfit.length },
+        'ordens sem lucro on-chain encerradas (receita retida em fiat)',
+      );
+    }
+
+    const eligible = settled.filter((o) => (o.profitLamports ?? 0n) > 0n);
     const totalProfit = eligible.reduce((acc, o) => acc + (o.profitLamports ?? 0n), 0n);
 
     const skip = async (reason: string): Promise<RunSummary> => {

@@ -2,7 +2,13 @@ import { PublicKey } from '@solana/web3.js';
 import type { GatewaySettings, Recipient } from '@prisma/client';
 import { config, TOTAL_BPS } from '../config';
 import { prisma } from '../database/client';
-import { GatewayError, type GatewaySettingsView, type RecipientConfig } from '../types';
+import {
+  GatewayError,
+  SUPPORTED_CURRENCIES,
+  type FiatCurrency,
+  type GatewaySettingsView,
+  type RecipientConfig,
+} from '../types';
 import { logger } from '../utils/logger';
 
 /**
@@ -91,6 +97,69 @@ export function computeNextRunAt(
   return new Date(instant);
 }
 
+/**
+ * Lê `depositRatesJson` sem nunca lançar: uma linha corrompida no banco não
+ * pode derrubar o painel inteiro. Ver `getDepositRates` em deposit.service —
+ * ali o mesmo default 1:1 vale para o cálculo.
+ */
+function parseDepositRatesJson(raw: string): Record<string, number> {
+  const fallback: Record<string, number> = { USD: 1, EUR: 1, BRL: 1 };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+  if (parsed === null || typeof parsed !== 'object') return fallback;
+
+  const rates = { ...fallback };
+  for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
+    const rate = Number(value);
+    if (Number.isFinite(rate) && rate > 0) rates[key.toUpperCase()] = rate;
+  }
+  return rates;
+}
+
+/**
+ * Valida o patch de câmbio vindo do painel.
+ *
+ * Vive aqui, e não em `deposit.service`, para não criar import circular: o
+ * serviço de depósito já depende deste módulo para ler as settings.
+ */
+function validateDepositRates(input: unknown): Record<string, number> {
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    throw new GatewayError(
+      'depositRates precisa ser um objeto { MOEDA: numero }',
+      'INVALID_SETTING',
+      false,
+    );
+  }
+
+  const rates: Record<string, number> = {};
+  for (const [key, value] of Object.entries(input as Record<string, unknown>)) {
+    const currency = key.toUpperCase();
+    if (!SUPPORTED_CURRENCIES.includes(currency as FiatCurrency)) {
+      throw new GatewayError(`depositRates: moeda não suportada "${key}"`, 'INVALID_SETTING', false);
+    }
+    const rate = Number(value);
+    // Teto de sanidade: um dedo escorregado em "1000" transformaria um depósito
+    // de 10 EUR numa ordem de 10.000 USDC saída do float do vault.
+    if (!Number.isFinite(rate) || rate <= 0 || rate > 100) {
+      throw new GatewayError(
+        `depositRates["${currency}"]: precisa ser um número em (0, 100]`,
+        'INVALID_SETTING',
+        false,
+      );
+    }
+    rates[currency] = rate;
+  }
+
+  if (Object.keys(rates).length === 0) {
+    throw new GatewayError('depositRates: objeto vazio', 'INVALID_SETTING', false);
+  }
+  return rates;
+}
+
 // ─────────────────────────── Seed / leitura ───────────────────────────
 
 export async function ensureSeeded(): Promise<void> {
@@ -156,6 +225,8 @@ export async function getSettingsView(): Promise<GatewaySettingsView> {
     minFeeBps: s.minFeeBps,
     maxFeeBps: s.maxFeeBps,
     fallbackProviderCostBps: s.fallbackProviderCostBps,
+    fiatRetainedBps: s.fiatRetainedBps,
+    depositRates: parseDepositRatesJson(s.depositRatesJson),
     nextRunAt: computeNextRunAt(
       s.distributionHour,
       s.distributionMinute,
@@ -177,6 +248,10 @@ export interface SettingsPatch {
   minFeeBps?: number;
   maxFeeBps?: number;
   fallbackProviderCostBps?: number;
+  /** Retenção em fiat, em bps (3000 = 30%). */
+  fiatRetainedBps?: number;
+  /** Câmbio do operador: { EUR: 1.08, BRL: 0.18 }. Ver `deposit.service`. */
+  depositRates?: Record<string, unknown>;
 }
 
 export async function updateSettings(patch: SettingsPatch): Promise<GatewaySettings> {
@@ -218,6 +293,23 @@ export async function updateSettings(patch: SettingsPatch): Promise<GatewaySetti
     data.minProfitLamports = BigInt(patch.minProfitLamports);
   }
 
+  if (patch.fiatRetainedBps !== undefined) {
+    // Teto de 9000 (90%): acima disso o cliente recebe quase nada em cripto e
+    // o produto deixa de ser o que a página promete.
+    if (
+      !Number.isInteger(patch.fiatRetainedBps) ||
+      patch.fiatRetainedBps < 0 ||
+      patch.fiatRetainedBps > 9_000
+    ) {
+      throw new GatewayError(
+        'fiatRetainedBps precisa ser inteiro 0..9000 (0% a 90%)',
+        'INVALID_SETTING',
+        false,
+      );
+    }
+    data.fiatRetainedBps = patch.fiatRetainedBps;
+  }
+
   for (const key of ['marginBps', 'minFeeBps', 'maxFeeBps', 'fallbackProviderCostBps'] as const) {
     const value = patch[key];
     if (value === undefined) continue;
@@ -225,6 +317,16 @@ export async function updateSettings(patch: SettingsPatch): Promise<GatewaySetti
       throw new GatewayError(`${key} precisa ser inteiro 0..${TOTAL_BPS}`, 'INVALID_SETTING', false);
     }
     data[key] = value;
+  }
+
+  if (patch.depositRates !== undefined) {
+    // Merge, não substituição: o painel edita uma moeda por vez, e zerar as
+    // outras silenciosamente faria depósitos saírem pelo câmbio errado.
+    const current = parseDepositRatesJson((await getSettings(true)).depositRatesJson);
+    data.depositRatesJson = JSON.stringify({
+      ...current,
+      ...validateDepositRates(patch.depositRates),
+    });
   }
 
   if (Object.keys(data).length === 0) {

@@ -2,6 +2,8 @@ import { config } from '../config';
 import { logger } from '../utils/logger';
 import { pruneExpiredLocks } from './lock.service';
 import { retryPendingOrders } from './order.service';
+import { reconcilePspPayments } from './reconcile.service';
+import { expireStaleIntents } from './deposit.service';
 import { runProfitDistribution } from './payout.service';
 import { computeNextRunAt, getSettings } from './settings.service';
 
@@ -23,8 +25,18 @@ const log = logger.child({ scope: 'scheduler' });
 const MAX_TIMEOUT_MS = 2_147_483_647;
 const SWEEP_INTERVAL_MS = 5 * 60 * 1_000;
 
+/**
+ * A reconciliação com o PSP roda bem mais rápido que a varredura de ordens.
+ *
+ * É ela que descobre um Pix pago depois de o cliente fechar a aba — e a
+ * diferença entre um minuto e cinco é a diferença entre "caiu na hora" e "o
+ * cliente escreveu perguntando".
+ */
+const RECONCILE_INTERVAL_MS = 60 * 1_000;
+
 let distributionTimer: NodeJS.Timeout | null = null;
 let sweepTimer: NodeJS.Timeout | null = null;
+let reconcileTimer: NodeJS.Timeout | null = null;
 let nextRunAt: Date | null = null;
 let started = false;
 
@@ -113,18 +125,44 @@ export async function startScheduler(): Promise<void> {
 
   sweepTimer = setInterval(() => {
     void retryPendingOrders()
+      // Sem isto, intenções vencidas ficavam AWAITING_PAYMENT para sempre em
+      // host persistente — só o tick do cron (serverless) as expirava.
+      .then(() => expireStaleIntents())
       .then(() => pruneExpiredLocks())
       .catch((err: unknown) => log.error({ err }, 'varredura de ordens pendentes falhou'));
   }, SWEEP_INTERVAL_MS);
   sweepTimer.unref();
 
-  log.info({ sweepMinutes: SWEEP_INTERVAL_MS / 60_000 }, 'agendador iniciado');
+  reconcileTimer = setInterval(() => {
+    void reconcilePspPayments()
+      .then((summary) => {
+        // Só vale log quando algo aconteceu: uma linha por minuto sem novidade
+        // esconderia justamente a linha que importa.
+        if (summary.confirmed.length > 0) {
+          void retryPendingOrders().catch((err: unknown) =>
+            log.error({ err }, 'pipeline após reconciliação falhou'),
+          );
+        }
+      })
+      .catch((err: unknown) => log.error({ err }, 'reconciliação com o PSP falhou'));
+  }, RECONCILE_INTERVAL_MS);
+  reconcileTimer.unref();
+
+  log.info(
+    {
+      sweepMinutes: SWEEP_INTERVAL_MS / 60_000,
+      reconcileSeconds: RECONCILE_INTERVAL_MS / 1_000,
+    },
+    'agendador iniciado',
+  );
 }
 
 export function stopScheduler(): void {
   if (distributionTimer) clearTimeout(distributionTimer);
   if (sweepTimer) clearInterval(sweepTimer);
+  if (reconcileTimer) clearInterval(reconcileTimer);
   distributionTimer = null;
   sweepTimer = null;
+  reconcileTimer = null;
   started = false;
 }

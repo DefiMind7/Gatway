@@ -61,16 +61,41 @@ model Order {
   /// Provedor escolhido como mais barato no momento da operação.
   feeSourceProvider String?
 
+  // ── Retenção em fiat (modelo cartão: 30% fica na conta, 70% vira SOL) ──
+  /// Fração do valor pago que NÃO foi convertida, em bps. Snapshot.
+  fiatRetainedBps    Int?
+  /// Valor absoluto retido, na moeda do pagamento. É a receita desta ordem
+  /// quando ela vem por um trilho com retenção — o lucro dela não está na
+  /// chain, está na conta bancária/PSP do operador.
+  retainedFiatAmount Decimal?
+
   // ── Swap (Jupiter v6) ──
   swapSignature       String?
   solReceivedLamports BigInt?
   quotedOutLamports   BigInt?
   priceImpactPct      String?
 
+  // ── Custo de rede repassado ao cliente ──
+  /// Lamports descontados do cliente para cobrir swap + liquidação.
+  /// Ficam no vault como REEMBOLSO, não como lucro: distribuí-los aos sócios
+  /// drenaria justamente o saldo que paga as taxas das próximas ordens.
+  networkCostLamports BigInt?
+  /// Quando este custo foi varrido para a carteira de gás. Null = ainda no vault.
+  gasSweptAt          DateTime?
+
   // ── Lucro retido desta ordem ──
   profitLamports BigInt?
   payoutRunId    String?
   payoutRun      PayoutRun? @relation(fields: [payoutRunId], references: [id])
+
+  // ── Liquidação manual (operador entregou por fora) ──
+  /// true quando o SOL não saiu pela pipeline: o operador mandou da carteira
+  /// dele e registrou aqui. Separado do fluxo automático de propósito — na
+  /// auditoria, "quem apertou o botão" é a primeira pergunta.
+  manualSettlement Boolean @default(false)
+  /// Quem registrou, e a observação que ele deixou.
+  settledBy        String?
+  settlementNote   String?
 
   // ── Máquina de estados ──
   status    String   @default("PENDING")
@@ -182,7 +207,142 @@ model GatewaySettings {
   /// Custo assumido quando nenhum provedor responde (fail-safe conservador).
   fallbackProviderCostBps Int @default(200)
 
+  // ── Retenção em fiat ──
+  /// Quanto do valor pago fica em fiat na conta do operador, em bps.
+  /// 3000 = 30%. O restante é que vira cripto para o cliente.
+  ///
+  /// Quando > 0, a taxa on-chain da ordem é ZERO: a receita já foi tirada no
+  /// lado fiat, e cobrar de novo no SOL seria cobrar duas vezes.
+  fiatRetainedBps Int @default(3000)
+
+  // ── Depósitos pelo provedor interno ──
+  /// Quantos USDC (base units de 1 unidade) valem 1 unidade de cada moeda
+  /// fiat, em JSON: {"USD":1,"EUR":1.08,"BRL":0.18}.
+  ///
+  /// É knob do operador de propósito: num trilho manual o câmbio é o que ELE
+  /// consegue no banco, não uma cotação de mercado. Default 1 em tudo —
+  /// correto para USD, e obriga a definir EUR/BRL antes de aceitar esses
+  /// trilhos em vez de silenciosamente errar o valor.
+  depositRatesJson String @default("{\"USD\":1,\"EUR\":1,\"BRL\":1}")
+
   updatedAt DateTime @updatedAt
+}
+
+/// Carteira Solana gerada pelo gateway para um cliente que não tem uma.
+///
+/// Guardar a chave privada faz do operador um CUSTODIANTE: o dinheiro é do
+/// cliente, a chave é nossa. Duas defesas, e nenhuma delas é opcional:
+///
+///  • `encryptedSecret` é AES-256-GCM com chave em `WALLET_ENCRYPTION_KEY`.
+///    Um dump do banco, sozinho, não move um lamport.
+///  • `revealedAt` registra a entrega da chave ao cliente. Depois de revelada,
+///    a carteira deixa de ser só nossa — e isso precisa ficar auditável.
+///
+/// O que NÃO existe aqui de propósito: a chave em claro, em nenhuma coluna,
+/// em nenhum momento.
+model CustomerWallet {
+  id        String @id @default(cuid())
+  /// Endereço público. É o destino do SOL na liquidação.
+  publicKey String @unique
+
+  /// Chave privada cifrada (base64). Ver `wallet.service.ts`.
+  encryptedSecret String
+  /// Nonce do AES-GCM (base64). Único por carteira.
+  iv              String
+  /// Tag de autenticação do GCM (base64). Sem ela o texto cifrado é maleável.
+  authTag         String
+  /// Versão do esquema de cifra, para permitir rotação futura sem adivinhação.
+  cipherVersion   Int    @default(1)
+
+  /// Quando o cliente pediu a chave. Null = nunca revelada.
+  revealedAt DateTime?
+  /// De onde veio o pedido de criação — só diagnóstico.
+  clientIp   String?
+
+  intents  DepositIntent[]
+  /// Null enquanto a carteira for de um depósito avulso (sem conta).
+  customer Customer?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([createdAt])
+}
+
+/// Conta de cliente.
+///
+/// A carteira nasce no CADASTRO, não a cada compra: é isso que faz o saldo do
+/// cliente acumular num lugar só em vez de espalhar por N endereços órfãos.
+/// Relação 1:1 com `CustomerWallet` — uma conta, uma carteira, para sempre.
+model Customer {
+  id    String @id @default(cuid())
+  email String @unique
+
+  /// scrypt: "scrypt$<salt base64>$<hash base64>". Nunca a senha em claro.
+  passwordHash String
+
+  /// A carteira da conta. Criada junto, no mesmo instante.
+  walletId String         @unique
+  wallet   CustomerWallet @relation(fields: [walletId], references: [id])
+
+  sessions    CustomerSession[]
+  intents     DepositIntent[]
+  withdrawals Withdrawal[]
+
+  clientIp    String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  lastLoginAt DateTime?
+
+  @@index([createdAt])
+}
+
+/// Sessão de login. Guardamos o HASH do token, nunca o token.
+///
+/// Sessão em tabela (e não JWT) porque aqui ela precisa ser revogável: se um
+/// cliente perder o telefone, o operador apaga a linha e acabou. Com JWT
+/// assinado isso exigiria uma lista de revogação — a mesma tabela, com mais
+/// passos.
+model CustomerSession {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  clientIp  String?
+
+  @@index([customerId])
+  @@index([expiresAt])
+}
+
+/// Saque: SOL saindo da carteira custodiada para um endereço do cliente.
+///
+/// A linha nasce ANTES do envio e só depois recebe a assinatura. Um registro
+/// SENT sem `signature` significa "pode ter saído" — é o estado que exige
+/// olhar a chain, e é melhor tê-lo do que descobrir a saída só pelo saldo.
+model Withdrawal {
+  id String @id @default(cuid())
+
+  customerId String
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  walletId   String
+
+  /// Endereço de destino, escolhido pelo cliente.
+  destination String
+  lamports    BigInt
+
+  signature String?
+  status    String  @default("SENT") // SENT | FAILED
+  lastError String?
+
+  clientIp    String?
+  createdAt   DateTime  @default(now())
+  confirmedAt DateTime?
+
+  @@index([customerId, createdAt])
+  @@index([walletId])
 }
 
 /// Lock distribuído com lease (arrendamento).
@@ -231,4 +391,102 @@ model ProviderFeeSnapshot {
 
   @@index([fiatCurrency, collectedAt])
   @@index([provider, collectedAt])
+}
+
+/// Intenção de depósito — o "provedor" interno do gateway.
+///
+/// Existe porque um on-ramp de verdade (SpherePay/MoonPay) exige onboarding de
+/// empresa: não dá para receber dinheiro hoje por ali. Aqui o operador é o
+/// próprio provedor — o cliente paga por um trilho que o operador já tem (Pix,
+/// SEPA, MB Way, Revolut) ou manda USDC direto, e a confirmação gera o MESMO
+/// evento normalizado que um provedor externo geraria. A pipeline a jusante
+/// (swap -> liquidação -> lucro -> distribuição) não sabe a diferença.
+///
+/// AWAITING_PAYMENT -> CONFIRMED (vira Order) | EXPIRED | CANCELLED
+model DepositIntent {
+  id String @id @default(cuid())
+
+  /// Código curto que o cliente põe na descrição da transferência. É por ele
+  /// que o operador liga o extrato bancário à intenção.
+  reference String @unique
+  /// PIX | SEPA | MBWAY | REVOLUT | USDC (ver `DepositMethod` em types).
+  method    String
+
+  fiatCurrency String
+  fiatAmount   Decimal
+
+  /// Destino do SOL. Validada como public key na criação.
+  customerWallet String
+  /// Preenchido quando a carteira foi gerada por nós (cliente sem carteira).
+  /// Null = o cliente trouxe a dele, e nós não temos chave nenhuma.
+  walletId       String?
+  wallet         CustomerWallet? @relation(fields: [walletId], references: [id])
+
+  /// Conta dona deste depósito. Null nos depósitos avulsos (sem cadastro).
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id])
+
+  /// SHA-256 do token entregue ao navegador que criou esta intenção.
+  ///
+  /// A `reference` sozinha não pode liberar a chave privada: ela aparece na
+  /// URL, em prints e no histórico do navegador. Quem pede a chave precisa
+  /// provar que é o mesmo navegador que criou o depósito. Guardamos só o hash
+  /// — um dump do banco não devolve o token.
+  claimTokenHash String?
+
+  /// Base units de USDC que esta ordem vai consumir do vault.
+  /// Para USDC é o valor que o cliente manda; para trilho fiat é
+  /// `fiatAmount * taxa configurada` — o float de USDC é do operador.
+  expectedInputRaw BigInt
+
+  /// Snapshot da cotação mostrada ao cliente (auditoria de "eu vi X").
+  quotedFeeBps      Int?
+  quotedCustomerSol String?
+
+  // ── Retenção em fiat ──
+  /// bps retidos em fiat nesta intenção (snapshot da configuração).
+  fiatRetainedBps    Int?
+  /// Valor retido, na moeda do pagamento.
+  retainedFiatAmount Decimal?
+
+  // ── PSP (cartão) ──
+  /// Id da preferência/checkout criada no PSP.
+  pspPreferenceId String?
+  /// Id do pagamento no PSP, quando ele existe. Reconciliação com o extrato.
+  pspPaymentId    String?
+  /// URL para onde o cliente é mandado para pagar. Não é segredo, mas some
+  /// da visão pública depois de confirmada.
+  pspCheckoutUrl  String?
+
+  // ── Pix com QR (Mercado Pago) ──
+  /// Payload "copia e cola" do Pix. É o que o app do banco entende.
+  pixCopyPaste String?
+  /// PNG do QR em base64, como o MP devolve. Guardado para a página não
+  /// precisar gerar imagem nenhuma.
+  pixQrBase64  String?
+  /// Quando o QR deixa de ser aceito pelo banco (o MP define).
+  pixExpiresAt DateTime?
+
+  status  String  @default("AWAITING_PAYMENT")
+  /// Ordem criada na confirmação. 1:1.
+  orderId String? @unique
+
+  /// Assinatura da tx do cliente (depósito USDC). UNIQUE: a mesma
+  /// transferência nunca confirma duas intenções.
+  depositSignature String? @unique
+  /// "admin" ou "onchain-watch" — quem confirmou.
+  confirmedBy      String?
+  note             String?
+  /// Só para rate limit e diagnóstico de abuso.
+  clientIp         String?
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  expiresAt   DateTime
+  confirmedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([status, expiresAt])
+  @@index([walletId])
+  @@index([customerId])
 }

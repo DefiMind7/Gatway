@@ -60,7 +60,12 @@ export const SUPPORTED_CURRENCIES: readonly FiatCurrency[] = [
  * Os adapters (SpherePay / MoonPay) traduzem para cá.
  */
 export interface NormalizedFiatEvent {
-  provider: 'spherepay' | 'moonpay';
+  /**
+   * `manual` é o provedor INTERNO (ver `deposit.service.ts`): o operador
+   * recebe o dinheiro por um trilho próprio e confirma. O evento tem
+   * exatamente a mesma forma dos externos, por isso a pipeline não muda.
+   */
+  provider: 'spherepay' | 'moonpay' | 'manual' | 'mercadopago';
   /** Chave de idempotência: id do evento no provedor. */
   eventId: string;
   /** Tipo já normalizado. Só `payment.completed` dispara a pipeline. */
@@ -174,7 +179,8 @@ export interface EffectiveFee {
   marginBps: number;
   /** providerCostBps + marginBps, limitado por minFeeBps/maxFeeBps. */
   feeBps: number;
-  sourceProvider: FeeProviderName | 'fallback';
+  /** `internal` = depósito pelo provedor interno: não há custo de on-ramp. */
+  sourceProvider: FeeProviderName | 'fallback' | 'internal';
   clamped: boolean;
 }
 
@@ -206,6 +212,129 @@ export interface DistributionResult {
   allocations: SplitAllocation[];
 }
 
+// ─────────────────────── Depósitos (provedor interno) ───────────────────────
+
+/**
+ * Trilhos de depósito aceitos.
+ *
+ * `USDC` é o único totalmente automático: o cliente manda a stablecoin para o
+ * vault e a chegada é detectada on-chain. Os demais são fiat em conta do
+ * operador — a confirmação é humana (o extrato bancário não tem webhook), e o
+ * USDC que lastreia a ordem sai do float do próprio vault.
+ */
+export const DepositMethod = {
+  USDC: 'USDC',
+  CARD: 'CARD',
+  /** Pix com QR pelo Mercado Pago: automático, cai na hora. */
+  PIXQR: 'PIXQR',
+  PIX: 'PIX',
+  SEPA: 'SEPA',
+  MBWAY: 'MBWAY',
+  REVOLUT: 'REVOLUT',
+} as const;
+
+export type DepositMethod = (typeof DepositMethod)[keyof typeof DepositMethod];
+
+export const DEPOSIT_METHODS: readonly DepositMethod[] = [
+  DepositMethod.USDC,
+  DepositMethod.CARD,
+  DepositMethod.PIXQR,
+  DepositMethod.PIX,
+  DepositMethod.SEPA,
+  DepositMethod.MBWAY,
+  DepositMethod.REVOLUT,
+];
+
+/**
+ * Trilhos que confirmam sem humano: `USDC` pela chain, `CARD` pelo PSP
+ * (webhook + consulta de status). O resto é fiat em conta, e extrato bancário
+ * não tem webhook — confirmação manual no painel.
+ */
+export function isAutoConfirmable(method: DepositMethod): boolean {
+  return (
+    method === DepositMethod.USDC ||
+    method === DepositMethod.CARD ||
+    method === DepositMethod.PIXQR
+  );
+}
+
+export const DepositIntentStatus = {
+  /** Criada; esperando o dinheiro. */
+  AWAITING_PAYMENT: 'AWAITING_PAYMENT',
+  /** Pagamento reconhecido: virou `Order` e a pipeline assumiu. */
+  CONFIRMED: 'CONFIRMED',
+  /** Passou do TTL sem pagamento. Não é erro. */
+  EXPIRED: 'EXPIRED',
+  /** Cancelada no painel. */
+  CANCELLED: 'CANCELLED',
+} as const;
+
+export type DepositIntentStatus =
+  (typeof DepositIntentStatus)[keyof typeof DepositIntentStatus];
+
+/**
+ * O que o checkout público pode ver. Deliberadamente sem `clientIp`, sem
+ * `note` e sem nada do vault além do endereço de depósito — a página é
+ * acessível por quem tiver a referência.
+ */
+export interface DepositIntentPublicView {
+  reference: string;
+  method: DepositMethod;
+  fiatCurrency: FiatCurrency;
+  fiatAmount: string;
+  customerWallet: string;
+  status: DepositIntentStatus;
+  /** Valor a pagar no trilho escolhido, já formatado para exibição. */
+  amountToPay: string;
+  /** Instruções do trilho (chave Pix, IBAN, endereço do vault...). */
+  instructions: DepositInstructionView;
+  quotedFeeBps: number | null;
+  quotedCustomerSol: string | null;
+  /** Carteira que vai receber o SOL, e de quem é a chave dela. */
+  wallet: {
+    address: string;
+    /** true = gerada pelo gateway, que guarda a chave cifrada. */
+    generated: boolean;
+  };
+  /** Para onde mandar o cliente pagar no cartão. Null nos outros trilhos. */
+  checkoutUrl: string | null;
+  /** Dados do Pix com QR. Null fora desse trilho. */
+  pix: {
+    /** Payload copia e cola. */
+    copyPaste: string;
+    /** PNG em base64, pronto para um <img src="data:image/png;base64,…">. */
+    qrBase64: string | null;
+    expiresAt: string | null;
+  } | null;
+  expiresAt: string;
+  createdAt: string;
+  /** Preenchidos depois da confirmação: o rastro on-chain do cliente. */
+  order: {
+    id: string;
+    status: OrderStatus;
+    customerSol: number | null;
+    swapSignature: string | null;
+    payoutSignature: string | null;
+    lastError: string | null;
+  } | null;
+}
+
+/** Como pagar. Os campos vêm de `DEPOSIT_INSTRUCTIONS_JSON` (ou do vault). */
+export interface DepositInstructionView {
+  method: DepositMethod;
+  label: string;
+  /** Chave Pix / IBAN / número MB Way / endereço Solana do vault. */
+  payTo: string;
+  /** Titular da conta, quando o trilho mostra isso. */
+  holder?: string;
+  /** Linhas livres de instrução, exibidas na ordem. */
+  lines: string[];
+  /** true quando o pagamento é detectado sozinho. */
+  autoConfirm: boolean;
+  /** true quando o pagamento acontece fora daqui (página do PSP). */
+  redirect?: boolean;
+}
+
 // ─────────────────────────── Settings (admin) ───────────────────────────
 
 export interface GatewaySettingsView {
@@ -218,6 +347,10 @@ export interface GatewaySettingsView {
   minFeeBps: number;
   maxFeeBps: number;
   fallbackProviderCostBps: number;
+  /** Quanto do valor pago fica em fiat, em bps (3000 = 30%). */
+  fiatRetainedBps: number;
+  /** Câmbio do operador para depósitos: USDC por 1 unidade de cada moeda. */
+  depositRates: Record<string, number>;
   /** Próximo disparo calculado, em ISO UTC. */
   nextRunAt: string;
   updatedAt: string;

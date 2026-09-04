@@ -4,6 +4,8 @@ import { config } from './config';
 import { logger } from './utils/logger';
 import { GatewayError, type RawBodyRequest } from './types';
 import adminRoutes from './routes/admin.routes';
+import depositRoutes from './routes/deposit.routes';
+import pwaRoutes from './routes/pwa.routes';
 import healthRoutes from './routes/health.routes';
 import quoteRoutes from './routes/quote.routes';
 import webhookRoutes from './routes/webhook.routes';
@@ -45,6 +47,10 @@ export function createApp(): Application {
   app.use('/health', healthRoutes);
   app.use('/webhook', webhookRoutes);
   app.use('/quote', quoteRoutes);
+  // Checkout público do provedor interno de depósitos.
+  app.use('/pay', depositRoutes);
+  // Manifesto, ícones e service worker — instalação na tela inicial.
+  app.use('/pwa', pwaRoutes);
   app.use('/admin', adminRoutes);
 
   app.use((req: Request, res: Response) => {

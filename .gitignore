@@ -10,3 +10,7 @@ src/database/*.db*
 prisma/*.db*
 .DS_Store
 npm-debug.log*
+
+# Backups do .env criados pelo keygen — contêm chaves de vault antigas.
+.env.bak-*
+.env.*.bak

@@ -8,6 +8,7 @@ import { resumeIncompleteRuns } from './services/payout.service';
 import { startScheduler, stopScheduler } from './services/scheduler.service';
 import { ensureSeeded, getSettingsView } from './services/settings.service';
 import { assertSolanaReachable, lamportsToSol } from './services/solana.service';
+import { assertWalletsReadable, walletStats } from './services/wallet.service';
 import { logger } from './utils/logger';
 
 /**
@@ -26,6 +27,15 @@ async function main(): Promise<void> {
   // Falhar aqui é barato; falhar no meio de uma ordem paga, não.
   await prisma.$queryRaw`SELECT 1`;
   const { slot, vaultLamports } = await assertSolanaReachable();
+
+  /**
+   * Confere que a chave de cifra abre as carteiras já existentes.
+   *
+   * Descobrir que `WALLET_ENCRYPTION_KEY` mudou no instante em que um cliente
+   * pede a chave dele é tarde demais — nesse ponto o dinheiro está inacessível.
+   */
+  const wallets = await walletStats();
+  await assertWalletsReadable();
 
   // Cria a linha de settings e semeia os destinatários na primeira subida.
   await ensureSeeded();
@@ -52,6 +62,9 @@ async function main(): Promise<void> {
         settings.distributionMinute,
       ).padStart(2, '0')} ${settings.distributionTimezone}`,
       pipelineEnabled: config.runtime.allowPipeline,
+      custodialWallets: config.wallet.enabled
+        ? `${wallets.total} (${wallets.revealed} entregues)`
+        : 'desligadas',
       splitPreview1Sol: split,
     },
     'gateway inicializado',

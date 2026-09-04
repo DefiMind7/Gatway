@@ -210,4 +210,15 @@ export const LOCK_NAMES = {
   PAYOUT: 'payout:global',
   /** Uma ordem por vez. */
   order: (orderId: string) => `order:${orderId}`,
+  /** Uma confirmação por intenção de depósito. */
+  depositIntent: (intentId: string) => `deposit:${intentId}`,
+  /**
+   * Uma varredura on-chain de depósitos por vez. Serve também de throttle: o
+   * TTL curto faz o lock ocupado significar "já varreram agora há pouco".
+   */
+  DEPOSIT_SCAN: 'deposit:scan',
+  /** Uma varredura de taxas de gás por vez. */
+  GAS_SWEEP: 'gas:sweep',
+  /** Uma reconciliação com o PSP por vez. */
+  PSP_RECONCILE: 'psp:reconcile',
 } as const;

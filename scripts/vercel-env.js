@@ -51,6 +51,26 @@ const OPTIONAL = [
   'FIAT_PROVIDER',
   'WEBHOOK_TOLERANCE_SECONDS',
   'LOG_LEVEL',
+  // Provedor interno de depósitos (/pay).
+  'DEPOSIT_ENABLED',
+  'DEPOSIT_METHODS',
+  'DEPOSIT_INSTRUCTIONS_JSON',
+  'DEPOSIT_MIN_AMOUNT',
+  'DEPOSIT_MAX_AMOUNT',
+  'DEPOSIT_INTENT_TTL_MINUTES',
+  'DEPOSIT_AUTOCONFIRM',
+  'DEPOSIT_SCAN_SIGNATURES',
+  'DEPOSIT_MAX_INTENTS_PER_HOUR',
+  'DEPOSIT_REQUIRE_FLOAT',
+  // Carteiras custodiadas. Sem a chave de cifra o app não sobe.
+  'WALLET_GENERATION',
+  'WALLET_ENCRYPTION_KEY',
+  // Mercado Pago (trilho de cartão).
+  'MERCADOPAGO_ACCESS_TOKEN',
+  'MERCADOPAGO_PUBLIC_KEY',
+  'MERCADOPAGO_WEBHOOK_SECRET',
+  'MERCADOPAGO_SANDBOX',
+  'PUBLIC_BASE_URL',
 ];
 /** Nunca enviadas: só fazem sentido local, ou vêm da integração da Vercel. */
 const SKIP = new Set(['DATABASE_URL', 'DATABASE_PROVIDER', 'PORT', 'NODE_ENV', 'LOG_LEVEL']);
