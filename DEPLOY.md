@@ -199,6 +199,34 @@ node -e "console.log('ADMIN_API_KEY=admin_'+require('crypto').randomBytes(24).to
 node -e "console.log('CRON_SECRET=cron_'+require('crypto').randomBytes(24).toString('hex'))"
 ```
 
+## O tick periódico: por que cron externo em vez do cron da Vercel
+
+`vercel.json` **não** define `crons`. Dois motivos, e o segundo é o que decide:
+
+1. deployment anônimo (o `vercel deploy --temporary`, útil para mostrar o
+   sistema antes de reivindicar o projeto) não aceita cron;
+2. o cron da Vercel no plano gratuito roda **uma vez por dia**. Este gateway
+   precisa reconciliar pagamento, expirar cobrança e retomar ordem em minutos,
+   não em horas — um tick diário é quase o mesmo que nenhum.
+
+A solução que funciona em qualquer host: aponte um cron externo gratuito
+(cron-job.org, EasyCron, GitHub Actions) para o tick, a cada 5 minutos:
+
+```
+GET https://SEU-DOMINIO/admin/cron/tick
+Authorization: Bearer <CRON_SECRET>
+```
+
+Em host persistente (Render, Fly.io, VPS) nada disso é necessário: o agendador
+roda dentro do processo, reconciliando a cada 60 segundos.
+
+Se preferir o cron da Vercel depois de reivindicar o projeto, basta devolver ao
+`vercel.json`:
+
+```json
+"crons": [{ "path": "/admin/cron/tick", "schedule": "0 0 * * *" }]
+```
+
 ## Endpoints de cron
 
 | Rota | O que faz |

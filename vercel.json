@@ -8,11 +8,10 @@
       "memory": 1024
     }
   },
-  "rewrites": [{ "source": "/(.*)", "destination": "/api/index" }],
-  "crons": [
+  "rewrites": [
     {
-      "path": "/admin/cron/tick",
-      "schedule": "0 0 * * *"
+      "source": "/(.*)",
+      "destination": "/api/index"
     }
   ]
 }
