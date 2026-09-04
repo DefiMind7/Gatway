@@ -33,6 +33,7 @@ import { createOrderFromEvent, dispatchOrderPipeline } from './order.service';
 import { getTokenBalanceRaw } from './solana.service';
 import { getSettings } from './settings.service';
 import { createWallet, revealSecret, type RevealedSecret } from './wallet.service';
+import { notifyMerchant } from './merchant.service';
 
 /**
  * PROVEDOR INTERNO DE DEPÓSITOS.
@@ -958,6 +959,20 @@ export async function confirmIntent(
       );
 
       const pipeline = await dispatchOrderPipeline(order.id);
+
+      /**
+       * Avisa a loja assim que o dinheiro entra, sem esperar a entrega do SOL.
+       *
+       * É o evento que a loja precisa para liberar o pedido dela — e é
+       * disparado sem `await` de propósito: um endereço de webhook lento não
+       * pode atrasar a confirmação do pagamento aqui.
+       */
+      if (updated.merchantId !== null) {
+        void notifyMerchant(updated.id).catch((err: unknown) =>
+          log.warn({ reference: updated.reference, err }, 'notificação à loja falhou'),
+        );
+      }
+
       return { intent: updated, orderId: order.id, created, pipeline };
     },
     { ttlMs: 90_000, meta: `confirm:${ref}` },

@@ -4,6 +4,7 @@ import { pruneExpiredLocks } from './lock.service';
 import { retryPendingOrders } from './order.service';
 import { reconcilePspPayments } from './reconcile.service';
 import { expireStaleIntents } from './deposit.service';
+import { retryMerchantNotifications } from './merchant.service';
 import { runProfitDistribution } from './payout.service';
 import { computeNextRunAt, getSettings } from './settings.service';
 
@@ -128,6 +129,9 @@ export async function startScheduler(): Promise<void> {
       // Sem isto, intenções vencidas ficavam AWAITING_PAYMENT para sempre em
       // host persistente — só o tick do cron (serverless) as expirava.
       .then(() => expireStaleIntents())
+      // Webhook de loja que não passou na hora: o endereço dela caiu, fez
+      // deploy, deu timeout. Sem repetir, o pedido fica sem liberação.
+      .then(() => retryMerchantNotifications())
       .then(() => pruneExpiredLocks())
       .catch((err: unknown) => log.error({ err }, 'varredura de ordens pendentes falhou'));
   }, SWEEP_INTERVAL_MS);

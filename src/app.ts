@@ -6,6 +6,8 @@ import { GatewayError, type RawBodyRequest } from './types';
 import adminRoutes from './routes/admin.routes';
 import depositRoutes from './routes/deposit.routes';
 import pwaRoutes from './routes/pwa.routes';
+import apiRoutes from './routes/api.routes';
+import { DOCS_PAGE_HTML } from './routes/docs.page';
 import healthRoutes from './routes/health.routes';
 import quoteRoutes from './routes/quote.routes';
 import webhookRoutes from './routes/webhook.routes';
@@ -51,6 +53,12 @@ export function createApp(): Application {
   app.use('/pay', depositRoutes);
   // Manifesto, ícones e service worker — instalação na tela inicial.
   app.use('/pwa', pwaRoutes);
+  // API das lojas integradas.
+  app.use('/api/v1', apiRoutes);
+  // Documentação da API — pública, é o que a loja lê antes de integrar.
+  app.get('/docs', (_req, res) => {
+    res.type('html').send(DOCS_PAGE_HTML);
+  });
   app.use('/admin', adminRoutes);
 
   app.use((req: Request, res: Response) => {

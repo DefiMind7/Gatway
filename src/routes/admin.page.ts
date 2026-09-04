@@ -143,6 +143,7 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
     <button data-go="depositos">Depósitos</button>
     <button data-go="dinheiro">Dinheiro</button>
     <button data-go="socios">Sócios</button>
+    <button data-go="lojas">Lojas</button>
     <button data-go="sistema">Sistema</button>
   </nav>
 
@@ -283,6 +284,38 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
       <span style="flex:1"></span>
       <button id="saveRecs">Salvar split</button>
     </div>
+  </section>
+
+  <section data-tab="lojas">
+    <h2>Lojas integradas — API</h2>
+    <div class="row" style="margin-bottom:12px">
+      <div><label>Nome da loja</label><input id="mName" style="width:180px" placeholder="Loja do Joao"></div>
+      <div><label>E-mail</label><input id="mEmail" style="width:200px" placeholder="contato@loja.com"></div>
+      <div><label>Webhook (https)</label><input id="mCallback" style="width:260px" placeholder="https://loja.com/webhooks/gateway"></div>
+      <button id="mCreate">Criar loja</button>
+    </div>
+
+    <div class="box danger hide" id="mKeyBox" style="background:#3a2c12;border-color:#6b4f1c">
+      <div class="k">Credenciais — copie agora, não aparecem de novo</div>
+      <div class="v mono" style="word-break:break-all;margin-top:6px">
+        <div>API key: <b id="mKeyValue">—</b></div>
+        <div style="margin-top:4px">Webhook secret: <b id="mSecretValue">—</b></div>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <button class="ghost mini" data-copy="mKeyValue">Copiar chave</button>
+        <button class="ghost mini" data-copy="mSecretValue">Copiar segredo</button>
+      </div>
+    </div>
+
+    <div class="scroll"><table id="mTable"><thead><tr>
+      <th>Loja</th><th>Chave</th><th>Webhook</th><th>Cobranças</th><th>Último uso</th><th>Estado</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+
+    <p class="dim" style="font-size:12px;margin-bottom:0">
+      A chave é guardada como hash: um dump do banco não devolve acesso a nenhuma loja. Perdeu?
+      Rotacione — a anterior deixa de valer no mesmo instante.
+      Documentação para integrar: <a href="/docs" target="_blank" rel="noopener">/docs</a>
+    </p>
   </section>
 
   <section data-tab="sistema">
@@ -475,6 +508,8 @@ function markTabs(d) {
     'Operação' + badge(pend + orph);
   // Intenção vencida não é fila: contá-la transforma o badge num número que
   // só cresce e ninguém mais olha.
+  const lojas = document.querySelector('#tabbar button[data-go="lojas"]');
+  if (lojas) lojas.textContent = 'Lojas';
   document.querySelector('#tabbar button[data-go="depositos"]').innerHTML =
     'Depósitos' + badge(d.deposits.awaitingActive);
 }
@@ -855,6 +890,78 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
+// ── Lojas ──
+async function loadMerchants() {
+  const d = await api('/merchants');
+  document.querySelector('#mTable tbody').innerHTML = d.merchants.map((m) =>
+    '<tr>' +
+    '<td data-l="Loja"><b>' + esc(m.name) + '</b><br><span class="dim" style="font-size:11px">' + esc(m.email) + '</span></td>' +
+    '<td data-l="Chave" class="mono dim">' + esc(m.apiKeyPrefix) + '…</td>' +
+    '<td data-l="Webhook" class="mono dim" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">' +
+      esc(m.callbackUrl || '—') + '</td>' +
+    '<td data-l="Cobranças" class="mono">' + m.charges + '</td>' +
+    '<td data-l="Último uso" class="mono dim">' + (m.lastUsedAt ? new Date(m.lastUsedAt).toLocaleString() : 'nunca') + '</td>' +
+    '<td data-l="Estado" class="' + (m.active ? 'ok' : 'dim') + '">' + (m.active ? 'ativa' : 'desativada') + '</td>' +
+    '<td data-l="" class="del">' +
+      '<button class="mini ghost" data-rotate="' + esc(m.id) + '">nova chave</button> ' +
+      '<button class="mini ghost" data-toggle="' + esc(m.id) + '" data-active="' + (m.active ? '1' : '') + '">' +
+      (m.active ? 'desativar' : 'ativar') + '</button>' +
+    '</td></tr>'
+  ).join('') || '<tr><td colspan="7" class="dim">nenhuma loja ainda</td></tr>';
+}
+
+function mostrarCredenciais(apiKey, secret) {
+  $('mKeyBox').classList.remove('hide');
+  $('mKeyValue').textContent = apiKey;
+  $('mSecretValue').textContent = secret || $('mSecretValue').textContent;
+}
+
+$('mCreate').onclick = async (e) => {
+  e.target.disabled = true;
+  try {
+    const r = await api('/merchants', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: $('mName').value.trim(),
+        email: $('mEmail').value.trim(),
+        callbackUrl: $('mCallback').value.trim() || undefined,
+      }),
+    });
+    mostrarCredenciais(r.apiKey, r.webhookSecret);
+    $('mName').value = ''; $('mEmail').value = ''; $('mCallback').value = '';
+    loadMerchants();
+  } catch (err) { alert('Erro: ' + err.message); }
+  finally { e.target.disabled = false; }
+};
+
+document.addEventListener('click', async (ev) => {
+  const t = ev.target;
+  if (!t.getAttribute) return;
+
+  const rotateId = t.getAttribute('data-rotate');
+  if (rotateId) {
+    if (!confirm('Gerar uma chave nova?\n\nA chave atual para de funcionar imediatamente — a loja ' +
+                 'precisa trocar antes da próxima cobrança.')) return;
+    try {
+      const r = await api('/merchants/' + encodeURIComponent(rotateId) + '/rotate', { method: 'POST' });
+      mostrarCredenciais(r.apiKey, null);
+      loadMerchants();
+    } catch (err) { alert('Erro: ' + err.message); }
+    return;
+  }
+
+  const toggleId = t.getAttribute('data-toggle');
+  if (toggleId) {
+    const ativa = t.getAttribute('data-active') === '1';
+    try {
+      await api('/merchants/' + encodeURIComponent(toggleId) + '/active', {
+        method: 'POST', body: JSON.stringify({ active: !ativa }),
+      });
+      loadMerchants();
+    } catch (err) { alert('Erro: ' + err.message); }
+  }
+});
+
 // ── Livro-razão ──
 function solscan(sig, label) {
   return sig
@@ -1013,7 +1120,7 @@ function setAutoRefresh(on) {
 $('autoRefresh').onchange = (e) => setAutoRefresh(e.target.checked);
 
 async function loadAll() {
-  try { await Promise.all([loadOverview(), loadSettings(), loadDeposits(), loadRecipients(), loadRuns(), loadOrders()]); }
+  try { await Promise.all([loadOverview(), loadSettings(), loadDeposits(), loadRecipients(), loadRuns(), loadOrders(), loadMerchants()]); }
   catch (e) {
     if (String(e.message).includes('unauthorized')) { sessionStorage.removeItem('adminKey'); location.reload(); }
     else console.error(e);

@@ -345,6 +345,40 @@ model Withdrawal {
   @@index([walletId])
 }
 
+/// Loja que integra o gateway como meio de pagamento.
+///
+/// O modelo é o de qualquer PSP: a loja cria uma cobrança pela API, manda o
+/// cliente dela para o checkout hospedado, e recebe um webhook quando o
+/// dinheiro entra. Nada do fluxo interno muda — a cobrança da loja vira uma
+/// `DepositIntent` como qualquer outra.
+model Merchant {
+  id   String @id @default(cuid())
+  name String
+  email String
+
+  /// SHA-256 da chave de API. A chave em claro é mostrada UMA vez, na criação.
+  /// Guardar o hash é o que impede que um dump do banco vire acesso às lojas.
+  apiKeyHash   String @unique
+  /// Prefixo visível (sk_live_a1b2…), só para a loja reconhecer qual chave é.
+  apiKeyPrefix String
+
+  /// Segredo com que assinamos os webhooks enviados a esta loja. Ela usa o
+  /// mesmo para verificar que a notificação veio de nós.
+  webhookSecret String
+
+  /// URL padrão de notificação. A cobrança pode sobrescrever.
+  callbackUrl String?
+
+  active    Boolean  @default(true)
+  intents   DepositIntent[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  lastUsedAt DateTime?
+
+  @@index([active])
+}
+
 /// Lock distribuído com lease (arrendamento).
 ///
 /// Substitui os locks in-process, que não valem nada quando há mais de uma
@@ -426,6 +460,22 @@ model DepositIntent {
   customerId String?
   customer   Customer? @relation(fields: [customerId], references: [id])
 
+  // ── Origem: loja integrada pela API ──
+  /// Null quando o depósito nasceu no nosso próprio checkout.
+  merchantId         String?
+  merchant           Merchant? @relation(fields: [merchantId], references: [id])
+  /// Id do pedido no sistema da loja. É por ele que ela reconcilia do lado dela.
+  merchantExternalId String?
+  /// Para onde notificar. Sobrescreve o `callbackUrl` da loja.
+  merchantCallbackUrl String?
+  /// Para onde devolver o cliente depois de pagar.
+  merchantReturnUrl   String?
+
+  /// Estado da notificação à loja. Null = ainda não avisada.
+  notifiedAt       DateTime?
+  notifyAttempts   Int       @default(0)
+  notifyLastError  String?
+
   /// SHA-256 do token entregue ao navegador que criou esta intenção.
   ///
   /// A `reference` sozinha não pode liberar a chave privada: ela aparece na
@@ -489,4 +539,6 @@ model DepositIntent {
   @@index([status, expiresAt])
   @@index([walletId])
   @@index([customerId])
+  @@index([merchantId, createdAt])
+  @@index([notifiedAt])
 }

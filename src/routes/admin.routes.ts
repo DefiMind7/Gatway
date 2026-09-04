@@ -19,6 +19,13 @@ import { scanOnchainDeposits } from '../services/deposit-watch.service';
 import { getGasSweepStatus, sweepGasFees } from '../services/gas.service';
 import { findOrphanPayments, reconcilePspPayments } from '../services/reconcile.service';
 import {
+  createMerchant,
+  listMerchants,
+  retryMerchantNotifications,
+  rotateApiKey,
+  setMerchantActive,
+} from '../services/merchant.service';
+import {
   reopenOrder,
   settleManually,
   undoManualSettlement,
@@ -465,6 +472,12 @@ router.all('/cron/tick', ah(async (req: Request, res: Response) => {
   }
 
   try {
+    steps.merchantNotifications = await retryMerchantNotifications();
+  } catch (err) {
+    steps.merchantNotifications = err instanceof Error ? err.message : String(err);
+  }
+
+  try {
     steps.prunedLocks = await pruneExpiredLocks();
   } catch (err) {
     steps.prunedLocks = err instanceof Error ? err.message : String(err);
@@ -582,6 +595,45 @@ router.post('/api/gas/sweep', ah(async (_req: Request, res: Response) => {
   const result = await sweepGasFees();
   log.warn({ sol: result.sol, orders: result.orderCount }, 'varredura de gás disparada pelo admin');
   res.json(jsonSafe(result));
+}));
+
+// ─────────────────────────── Lojas integradas ───────────────────────────
+
+router.get('/api/merchants', ah(async (_req: Request, res: Response) => {
+  res.json({ merchants: await listMerchants() });
+}));
+
+/**
+ * Cria a loja e devolve a chave de API.
+ *
+ * A chave aparece UMA vez: guardamos só o hash. Se a loja perder, o caminho é
+ * rotacionar, não recuperar.
+ */
+router.post('/api/merchants', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { name?: string; email?: string; callbackUrl?: string };
+  const created = await createMerchant({
+    name: String(body.name ?? ''),
+    email: String(body.email ?? ''),
+    callbackUrl: body.callbackUrl,
+  });
+
+  log.warn({ merchantId: created.merchant.id }, 'loja criada pelo admin');
+  res.status(201).json({
+    id: created.merchant.id,
+    name: created.merchant.name,
+    apiKey: created.apiKey,
+    webhookSecret: created.webhookSecret,
+  });
+}));
+
+router.post('/api/merchants/:id/rotate', ah(async (req: Request, res: Response) => {
+  res.json({ apiKey: await rotateApiKey(String(req.params.id ?? '')) });
+}));
+
+router.post('/api/merchants/:id/active', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { active?: boolean };
+  await setMerchantActive(String(req.params.id ?? ''), body.active === true);
+  res.json({ ok: true });
 }));
 
 // ─────────────────────────── Ordens ───────────────────────────
