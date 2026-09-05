@@ -15,3 +15,6 @@ npm-debug.log*
 .env.bak-*
 .env.*.bak
 .vercel
+
+# Bloco de variáveis para colar na Vercel — contém credenciais.
+vercel-env-paste.txt
