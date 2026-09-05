@@ -27,7 +27,9 @@
                     "preflight":  "tsx scripts/preflight.ts",
                     "selftest":  "tsx scripts/selftest.ts",
                     "diag:withdraw":  "tsx scripts/diag-withdraw.ts",
-                    "deploy":  "node scripts/deploy.js"
+                    "deploy":  "node scripts/deploy.js",
+                    "setup":  "node scripts/setup.js",
+                    "db:init":  "node scripts/db-init.js"
                 },
     "dependencies":  {
                          "@prisma/client":  "^5.22.0",
