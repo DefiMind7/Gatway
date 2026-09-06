@@ -71,14 +71,34 @@ export default async function handler(
     ];
     const missing = required.filter((k) => !process.env[k]);
 
+    /**
+     * `problems` só é preenchido por `ConfigError`. Qualquer outra falha de
+     * boot — Prisma sem conseguir conectar, engine com binário errado, import
+     * quebrado — chega aqui com a lista VAZIA.
+     *
+     * O `??` que estava aqui não cobria esse caso: ele só troca `null` e
+     * `undefined`, e um array vazio passa direto. O resultado era uma resposta
+     * que dizia "configuração incompleta" sem dizer nada, e sem a mensagem do
+     * erro real, que é justamente a única coisa útil quando não falta variável
+     * nenhuma.
+     */
+    const detalhes =
+      bootError && bootError.problems.length > 0
+        ? bootError.problems
+        : [bootError?.message ?? 'erro desconhecido'];
+
+    const semVariaveisFaltando = missing.length === 0;
+
     res.statusCode = 503;
     res.setHeader('Content-Type', 'application/json; charset=utf-8');
     res.end(
       JSON.stringify(
         {
-          error: 'configuration_error',
-          message: 'O gateway não inicializou: configuração incompleta.',
-          problems: bootError?.problems ?? [bootError?.message ?? 'erro desconhecido'],
+          error: semVariaveisFaltando ? 'boot_error' : 'configuration_error',
+          message: semVariaveisFaltando
+            ? 'O gateway não inicializou. As variáveis estão todas definidas — veja `problems`.'
+            : 'O gateway não inicializou: configuração incompleta.',
+          problems: detalhes,
           missingEnvVars: missing,
           hint:
             'Defina as variáveis no painel da plataforma (na Vercel: Settings → ' +
