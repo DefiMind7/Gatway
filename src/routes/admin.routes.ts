@@ -19,6 +19,12 @@ import { scanOnchainDeposits } from '../services/deposit-watch.service';
 import { getGasSweepStatus, sweepGasFees } from '../services/gas.service';
 import { findOrphanPayments, reconcilePspPayments } from '../services/reconcile.service';
 import {
+  approveApplication,
+  countPending,
+  listApplications,
+  rejectApplication,
+} from '../services/application.service';
+import {
   createMerchant,
   listMerchants,
   retryMerchantNotifications,
@@ -171,13 +177,14 @@ router.get('/api/overview', ah(async (_req: Request, res: Response) => {
       getTokenBalanceRaw(config.swap.inputMint).catch(() => null),
     ]);
 
-  const [retained, float, pending, gas, orphans] = await Promise.all([
+  const [retained, float, pending, gas, orphans, pedidosPendentes] = await Promise.all([
     getRetainedFiatTotals(),
     getFloatStatus(),
     getPendingDelivery(),
     getGasSweepStatus(),
     // Falha do PSP não pode derrubar a visão geral inteira.
     findOrphanPayments().catch(() => []),
+    countPending(),
   ]);
   const decimals = config.swap.inputMintDecimals;
 
@@ -255,6 +262,8 @@ router.get('/api/overview', ah(async (_req: Request, res: Response) => {
      * aparece aqui.
      */
     orphanPayments: orphans,
+    /** Lojas esperando análise para receber chave de API. */
+    pendingApplications: pedidosPendentes,
     warnings: {
       partialRuns: partial,
       vaultBelowReserve:
@@ -595,6 +604,32 @@ router.post('/api/gas/sweep', ah(async (_req: Request, res: Response) => {
   const result = await sweepGasFees();
   log.warn({ sol: result.sol, orders: result.orderCount }, 'varredura de gás disparada pelo admin');
   res.json(jsonSafe(result));
+}));
+
+// ─────────────────────── Pedidos de integração ───────────────────────
+
+router.get('/api/applications', ah(async (req: Request, res: Response) => {
+  const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+  res.json({ applications: await listApplications(status) });
+}));
+
+/**
+ * Aprova: cria a loja e devolve as credenciais.
+ *
+ * A chave sai UMA vez — o banco guarda só o hash. Quem aprovar precisa copiar
+ * agora e mandar para a loja por um canal seguro.
+ */
+router.post('/api/applications/:id/approve', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { note?: string };
+  const resultado = await approveApplication(String(req.params.id ?? ''), body.note);
+  log.warn({ merchantId: resultado.merchantId }, 'pedido aprovado pelo admin');
+  res.json(resultado);
+}));
+
+router.post('/api/applications/:id/reject', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { note?: string };
+  await rejectApplication(String(req.params.id ?? ''), body.note);
+  res.json({ ok: true });
 }));
 
 // ─────────────────────────── Lojas integradas ───────────────────────────

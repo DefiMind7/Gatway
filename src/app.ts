@@ -8,6 +8,7 @@ import depositRoutes from './routes/deposit.routes';
 import pwaRoutes from './routes/pwa.routes';
 import apiRoutes from './routes/api.routes';
 import { DOCS_PAGE_HTML } from './routes/docs.page';
+import { PARTNER_PAGE_HTML } from './routes/partner.page';
 import healthRoutes from './routes/health.routes';
 import quoteRoutes from './routes/quote.routes';
 import webhookRoutes from './routes/webhook.routes';
@@ -58,6 +59,11 @@ export function createApp(): Application {
   // Documentação da API — pública, é o que a loja lê antes de integrar.
   app.get('/docs', (_req, res) => {
     res.type('html').send(DOCS_PAGE_HTML);
+  });
+
+  // Candidatura de lojas — a porta de entrada comercial.
+  app.get('/parceiros', (_req, res) => {
+    res.type('html').send(PARTNER_PAGE_HTML);
   });
   app.use('/admin', adminRoutes);
 

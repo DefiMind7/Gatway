@@ -379,6 +379,47 @@ model Merchant {
   @@index([active])
 }
 
+/// Pedido de uma loja para usar o gateway como checkout.
+///
+/// Fica separado de `Merchant` de propósito: um pedido é uma intenção de
+/// alguém de fora, e um `Merchant` é uma credencial que cobra dinheiro. A
+/// aprovação é o momento em que uma coisa vira a outra — e sem esse degrau o
+/// formulário público estaria emitindo chave de API para qualquer um.
+model MerchantApplication {
+  id String @id @default(cuid())
+
+  // ── Quem está pedindo ──
+  companyName String
+  legalName   String?
+  taxId       String?
+  email       String
+  phone       String?
+  website     String?
+
+  /// Onde a loja quer receber os webhooks. Validado como https público.
+  callbackUrl String?
+
+  // ── O que pretende fazer ──
+  /// Faixa de volume mensal esperada, na escolha da loja.
+  expectedVolume String?
+  description    String?
+
+  /// `pendente` | `aprovado` | `recusado`
+  status String @default("pendente")
+  /// Anotação do operador — motivo da recusa, ou observação da aprovação.
+  reviewNote String?
+
+  /// Preenchido na aprovação: a loja que nasceu deste pedido.
+  merchantId String? @unique
+
+  clientIp   String?
+  createdAt  DateTime  @default(now())
+  reviewedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([email])
+}
+
 /// Lock distribuído com lease (arrendamento).
 ///
 /// Substitui os locks in-process, que não valem nada quando há mais de uma

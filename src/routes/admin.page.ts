@@ -287,6 +287,19 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
   </section>
 
   <section data-tab="lojas">
+    <h2>Pedidos de integração — aguardando análise</h2>
+    <div id="appOut" class="dim" style="font-size:13px;margin-bottom:10px">—</div>
+    <div class="scroll"><table id="appTable"><thead><tr>
+      <th>Quando</th><th>Empresa</th><th>Contato</th><th>Volume</th><th>Webhook</th>
+      <th>O que faz</th><th>Estado</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+    <p class="dim" style="font-size:12px;margin-bottom:0">
+      A chave de API só nasce na aprovação — e aparece uma única vez, aqui. O formulário público
+      fica em <a href="/parceiros" target="_blank" rel="noopener">/parceiros</a>.
+    </p>
+  </section>
+
+  <section data-tab="lojas">
     <h2>Lojas integradas — API</h2>
     <div class="row" style="margin-bottom:12px">
       <div><label>Nome da loja</label><input id="mName" style="width:180px" placeholder="Loja do Joao"></div>
@@ -509,7 +522,7 @@ function markTabs(d) {
   // Intenção vencida não é fila: contá-la transforma o badge num número que
   // só cresce e ninguém mais olha.
   const lojas = document.querySelector('#tabbar button[data-go="lojas"]');
-  if (lojas) lojas.textContent = 'Lojas';
+  if (lojas) lojas.innerHTML = 'Lojas' + badge(d.pendingApplications || 0);
   document.querySelector('#tabbar button[data-go="depositos"]').innerHTML =
     'Depósitos' + badge(d.deposits.awaitingActive);
 }
@@ -547,6 +560,9 @@ async function loadOverview() {
     const desde = p.oldestAt ? ' O mais antigo espera desde ' + new Date(p.oldestAt).toLocaleString() + '.' : '';
     w.push(['e', p.count + ' cliente(s) pagaram e ainda não receberam SOL. Compre ' +
       fmt(p.usdcNeeded, 2) + ' USDC e envie para o vault — as ordens concluem sozinhas depois disso.' + desde]);
+  }
+  if ((d.pendingApplications || 0) > 0) {
+    w.push(['w', d.pendingApplications + ' loja(s) pedindo integração — veja a aba Lojas.']);
   }
   if ((d.orphanPayments || []).length > 0) {
     w.push(['e', d.orphanPayments.length + ' pagamento(s) aprovado(s) no Mercado Pago sem ordem ' +
@@ -890,6 +906,97 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
+// ── Pedidos de integração ──
+const APP_ESTADO = {
+  pendente: '<span class="warn">aguardando análise</span>',
+  aprovado: '<span class="ok">aprovado</span>',
+  recusado: '<span class="dim">recusado</span>',
+};
+
+async function loadApplications() {
+  const d = await api('/applications');
+  const lista = d.applications || [];
+  const pendentes = lista.filter((a) => a.status === 'pendente').length;
+
+  $('appOut').innerHTML = pendentes === 0
+    ? '<span class="ok">Nenhum pedido aguardando.</span>'
+    : '<b class="warn">' + pendentes + '</b> pedido(s) aguardando a sua análise';
+
+  document.querySelector('#appTable tbody').innerHTML = lista.map((a) => {
+    const acoes = a.status === 'pendente'
+      ? '<button class="mini" data-approve="' + esc(a.id) + '">aprovar</button> ' +
+        '<button class="mini ghost" data-reject="' + esc(a.id) + '">recusar</button>'
+      : (a.reviewNote ? '<span class="dim" style="font-size:11px">' + esc(a.reviewNote.slice(0, 40)) + '</span>' : '');
+
+    const contato = esc(a.email) +
+      (a.phone ? '<br><span class="dim" style="font-size:11px">' + esc(a.phone) + '</span>' : '');
+
+    const empresa = '<b>' + esc(a.companyName) + '</b>' +
+      (a.taxId ? '<br><span class="dim mono" style="font-size:11px">' + esc(a.taxId) + '</span>' : '') +
+      (a.website ? '<br><a style="font-size:11px" target="_blank" rel="noopener" href="' +
+        esc(a.website) + '">site</a>' : '');
+
+    return '<tr>' +
+      '<td data-l="Quando" class="mono dim">' + new Date(a.createdAt).toLocaleString() + '</td>' +
+      '<td data-l="Empresa">' + empresa + '</td>' +
+      '<td data-l="Contato">' + contato + '</td>' +
+      '<td data-l="Volume" class="dim">' + esc(a.expectedVolume || '—') + '</td>' +
+      '<td data-l="Webhook" class="mono dim" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">' +
+        esc(a.callbackUrl || '—') + '</td>' +
+      '<td data-l="O que faz" class="dim" style="max-width:220px;white-space:normal">' +
+        esc((a.description || '—').slice(0, 140)) + '</td>' +
+      '<td data-l="Estado">' + (APP_ESTADO[a.status] || esc(a.status)) + '</td>' +
+      '<td data-l="" class="del">' + acoes + '</td>' +
+      '</tr>';
+  }).join('') || '<tr><td colspan="8" class="dim">nenhum pedido ainda</td></tr>';
+}
+
+document.addEventListener('click', async (ev) => {
+  const t = ev.target;
+  if (!t.getAttribute) return;
+
+  const aprovarId = t.getAttribute('data-approve');
+  if (aprovarId) {
+    const dados = await ask({
+      title: 'Aprovar e criar a loja',
+      message: 'Isso cria a loja e emite a chave de API. A chave aparece <b>uma única vez</b> — ' +
+        'copie e mande para o contato da empresa por um canal seguro.',
+      okLabel: 'Aprovar e gerar chave',
+      fields: [{ name: 'note', label: 'Observação (opcional)', placeholder: 'combinado por telefone, etc.' }],
+    });
+    if (dados === null) return;
+
+    t.disabled = true;
+    try {
+      const r = await api('/applications/' + encodeURIComponent(aprovarId) + '/approve', {
+        method: 'POST', body: JSON.stringify({ note: dados.note }),
+      });
+      mostrarCredenciais(r.apiKey, r.webhookSecret);
+      showTab('lojas');
+      loadAll();
+    } catch (err) { alert('Erro: ' + err.message); t.disabled = false; }
+    return;
+  }
+
+  const recusarId = t.getAttribute('data-reject');
+  if (recusarId) {
+    const dados = await ask({
+      title: 'Recusar pedido',
+      message: 'O motivo fica registrado no painel. Nenhuma chave é emitida.',
+      okLabel: 'Recusar',
+      danger: true,
+      fields: [{ name: 'note', label: 'Motivo', placeholder: 'fora do perfil, dados insuficientes…' }],
+    });
+    if (dados === null) return;
+    try {
+      await api('/applications/' + encodeURIComponent(recusarId) + '/reject', {
+        method: 'POST', body: JSON.stringify({ note: dados.note }),
+      });
+      loadAll();
+    } catch (err) { alert('Erro: ' + err.message); }
+  }
+});
+
 // ── Lojas ──
 async function loadMerchants() {
   const d = await api('/merchants');
@@ -1120,7 +1227,7 @@ function setAutoRefresh(on) {
 $('autoRefresh').onchange = (e) => setAutoRefresh(e.target.checked);
 
 async function loadAll() {
-  try { await Promise.all([loadOverview(), loadSettings(), loadDeposits(), loadRecipients(), loadRuns(), loadOrders(), loadMerchants()]); }
+  try { await Promise.all([loadOverview(), loadSettings(), loadDeposits(), loadRecipients(), loadRuns(), loadOrders(), loadMerchants(), loadApplications()]); }
   catch (e) {
     if (String(e.message).includes('unauthorized')) { sessionStorage.removeItem('adminKey'); location.reload(); }
     else console.error(e);
