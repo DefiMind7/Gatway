@@ -34,6 +34,7 @@ import { getTokenBalanceRaw } from './solana.service';
 import { getSettings } from './settings.service';
 import { createWallet, revealSecret, type RevealedSecret } from './wallet.service';
 import { notifyMerchant } from './merchant.service';
+import { creditSale } from './merchant-ledger.service';
 
 /**
  * PROVEDOR INTERNO DE DEPÓSITOS.
@@ -843,7 +844,12 @@ export interface ConfirmOptions {
 
 export interface ConfirmResult {
   intent: DepositIntent;
-  orderId: string;
+  /**
+   * Null nas vendas de loja: ali o gateway é adquirente, o dinheiro vira saldo
+   * da loja, e não existe entrega de cripto ao pagador — portanto não existe
+   * ordem. Só o cliente que compra SOL direto gera ordem.
+   */
+  orderId: string | null;
   /** false quando a intenção já estava confirmada (idempotência). */
   created: boolean;
   pipeline: { inline: boolean; timedOut: boolean; elapsedMs: number } | null;
@@ -902,6 +908,40 @@ export async function confirmIntent(
           { reference: intent.reference, expiresAt: intent.expiresAt.toISOString() },
           'confirmando intenção expirada por decisão do operador',
         );
+      }
+
+      /**
+       * Venda de loja não entrega cripto ao pagador.
+       *
+       * Aqui o gateway é adquirente: o cliente da loja paga em reais e pronto.
+       * O dinheiro vira SALDO da loja, e é ela quem depois pede saque em SOL.
+       * Criar ordem de entrega neste ponto mandaria cripto para quem só quis
+       * comprar um produto.
+       */
+      if (intent.merchantId !== null) {
+        const merchant = await prisma.merchant.findUnique({ where: { id: intent.merchantId } });
+        if (merchant) await creditSale(intent, merchant);
+
+        const vendida = await prisma.depositIntent.update({
+          where: { id: intent.id },
+          data: {
+            status: DepositIntentStatus.CONFIRMED,
+            confirmedBy: options.confirmedBy,
+            confirmedAt: new Date(),
+            ...(options.note !== undefined ? { note: options.note } : {}),
+          },
+        });
+
+        void notifyMerchant(vendida.id).catch((err: unknown) =>
+          log.warn({ reference: vendida.reference, err }, 'notificação à loja falhou'),
+        );
+
+        log.info(
+          { reference: vendida.reference, merchantId: intent.merchantId },
+          'venda de loja confirmada — saldo creditado',
+        );
+
+        return { intent: vendida, orderId: null, created: true, pipeline: null };
       }
 
       const event: NormalizedFiatEvent = {

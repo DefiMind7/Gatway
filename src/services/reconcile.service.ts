@@ -90,7 +90,8 @@ export async function reconcilePspPayments(): Promise<ReconcileSummary> {
           summary.confirmed.push({
             reference: intent.reference,
             paymentId: payment.id,
-            orderId: result.orderId,
+            // Venda de loja não gera ordem — o campo carrega isso honestamente.
+            orderId: result.orderId ?? '(venda de loja — sem entrega)',
           });
           log.warn(
             { reference: intent.reference, paymentId: payment.id, orderId: result.orderId },

@@ -25,6 +25,12 @@ import {
   rejectApplication,
 } from '../services/application.service';
 import {
+  approveWithdrawal as approveMerchantWithdrawal,
+  listWithdrawals as listMerchantWithdrawals,
+  rejectWithdrawal as rejectMerchantWithdrawal,
+  syncWithdrawals,
+} from '../services/merchant-ledger.service';
+import {
   createMerchant,
   listMerchants,
   retryMerchantNotifications,
@@ -177,7 +183,8 @@ router.get('/api/overview', ah(async (_req: Request, res: Response) => {
       getTokenBalanceRaw(config.swap.inputMint).catch(() => null),
     ]);
 
-  const [retained, float, pending, gas, orphans, pedidosPendentes] = await Promise.all([
+  const [retained, float, pending, gas, orphans, pedidosPendentes, saquesPendentes] =
+    await Promise.all([
     getRetainedFiatTotals(),
     getFloatStatus(),
     getPendingDelivery(),
@@ -185,6 +192,7 @@ router.get('/api/overview', ah(async (_req: Request, res: Response) => {
     // Falha do PSP não pode derrubar a visão geral inteira.
     findOrphanPayments().catch(() => []),
     countPending(),
+    prisma.merchantWithdrawal.count({ where: { status: 'pendente' } }),
   ]);
   const decimals = config.swap.inputMintDecimals;
 
@@ -264,6 +272,8 @@ router.get('/api/overview', ah(async (_req: Request, res: Response) => {
     orphanPayments: orphans,
     /** Lojas esperando análise para receber chave de API. */
     pendingApplications: pedidosPendentes,
+    /** Lojas esperando o dinheiro delas sair. */
+    pendingWithdrawals: saquesPendentes,
     warnings: {
       partialRuns: partial,
       vaultBelowReserve:
@@ -481,6 +491,12 @@ router.all('/cron/tick', ah(async (req: Request, res: Response) => {
   }
 
   try {
+    steps.withdrawalSync = await syncWithdrawals();
+  } catch (err) {
+    steps.withdrawalSync = err instanceof Error ? err.message : String(err);
+  }
+
+  try {
     steps.merchantNotifications = await retryMerchantNotifications();
   } catch (err) {
     steps.merchantNotifications = err instanceof Error ? err.message : String(err);
@@ -604,6 +620,33 @@ router.post('/api/gas/sweep', ah(async (_req: Request, res: Response) => {
   const result = await sweepGasFees();
   log.warn({ sol: result.sol, orders: result.orderCount }, 'varredura de gás disparada pelo admin');
   res.json(jsonSafe(result));
+}));
+
+// ─────────────────────── Saques das lojas ───────────────────────
+
+router.get('/api/withdrawals', ah(async (req: Request, res: Response) => {
+  const status = typeof req.query.status === 'string' ? req.query.status : undefined;
+  res.json({ withdrawals: await listMerchantWithdrawals({ status, limit: 100 }) });
+}));
+
+/**
+ * Aprova o saque: cria a ordem que converte fiat em SOL e entrega.
+ *
+ * Consome o float de USDC do vault, como qualquer entrega. Se não houver
+ * lastro, a ordem espera na fila de entrega em vez de falhar.
+ */
+router.post('/api/withdrawals/:id/approve', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { note?: string };
+  const r = await approveMerchantWithdrawal(String(req.params.id ?? ''), body.note);
+  log.warn({ orderId: r.orderId }, 'saque de loja aprovado pelo admin');
+  res.json(r);
+}));
+
+/** Recusa e devolve o valor ao saldo da loja. */
+router.post('/api/withdrawals/:id/reject', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { note?: string };
+  await rejectMerchantWithdrawal(String(req.params.id ?? ''), body.note);
+  res.json({ ok: true });
 }));
 
 // ─────────────────────── Pedidos de integração ───────────────────────

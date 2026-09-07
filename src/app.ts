@@ -9,6 +9,7 @@ import pwaRoutes from './routes/pwa.routes';
 import apiRoutes from './routes/api.routes';
 import { DOCS_PAGE_HTML } from './routes/docs.page';
 import { PARTNER_PAGE_HTML } from './routes/partner.page';
+import merchantRoutes from './routes/merchant.routes';
 import healthRoutes from './routes/health.routes';
 import quoteRoutes from './routes/quote.routes';
 import webhookRoutes from './routes/webhook.routes';
@@ -60,6 +61,9 @@ export function createApp(): Application {
   app.get('/docs', (_req, res) => {
     res.type('html').send(DOCS_PAGE_HTML);
   });
+
+  // Portal da loja: faturamento e saque. Separado do painel do operador.
+  app.use('/loja', merchantRoutes);
 
   // Candidatura de lojas — a porta de entrada comercial.
   app.get('/parceiros', (_req, res) => {

@@ -287,6 +287,18 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
   </section>
 
   <section data-tab="lojas">
+    <h2>Saques das lojas — dinheiro para enviar</h2>
+    <div id="wdOut" class="dim" style="font-size:13px;margin-bottom:10px">—</div>
+    <div class="scroll"><table id="wdTable"><thead><tr>
+      <th>Quando</th><th>Loja</th><th>Valor</th><th>Carteira</th><th>Estado</th><th>Comprovante</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+    <p class="dim" style="font-size:12px;margin-bottom:0">
+      Aprovar cria a ordem que converte o valor em SOL e envia — consome float de USDC do vault,
+      como qualquer entrega. Recusar devolve o valor ao saldo da loja.
+    </p>
+  </section>
+
+  <section data-tab="lojas">
     <h2>Pedidos de integração — aguardando análise</h2>
     <div id="appOut" class="dim" style="font-size:13px;margin-bottom:10px">—</div>
     <div class="scroll"><table id="appTable"><thead><tr>
@@ -317,6 +329,16 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
       <div class="row" style="margin-top:8px">
         <button class="ghost mini" data-copy="mKeyValue">Copiar chave</button>
         <button class="ghost mini" data-copy="mSecretValue">Copiar segredo</button>
+      </div>
+      <div id="mPortal" class="hide" style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
+        <div class="k">Acesso ao portal da loja (/loja)</div>
+        <div class="v mono" style="margin-top:4px">
+          <div>E-mail: <b id="mPortalEmail">—</b></div>
+          <div style="margin-top:4px">Senha: <b id="mPortalSenha">—</b></div>
+        </div>
+        <div class="row" style="margin-top:8px">
+          <button class="ghost mini" data-copy="mPortalSenha">Copiar senha</button>
+        </div>
       </div>
     </div>
 
@@ -522,7 +544,7 @@ function markTabs(d) {
   // Intenção vencida não é fila: contá-la transforma o badge num número que
   // só cresce e ninguém mais olha.
   const lojas = document.querySelector('#tabbar button[data-go="lojas"]');
-  if (lojas) lojas.innerHTML = 'Lojas' + badge(d.pendingApplications || 0);
+  if (lojas) lojas.innerHTML = 'Lojas' + badge((d.pendingApplications || 0) + (d.pendingWithdrawals || 0));
   document.querySelector('#tabbar button[data-go="depositos"]').innerHTML =
     'Depósitos' + badge(d.deposits.awaitingActive);
 }
@@ -560,6 +582,9 @@ async function loadOverview() {
     const desde = p.oldestAt ? ' O mais antigo espera desde ' + new Date(p.oldestAt).toLocaleString() + '.' : '';
     w.push(['e', p.count + ' cliente(s) pagaram e ainda não receberam SOL. Compre ' +
       fmt(p.usdcNeeded, 2) + ' USDC e envie para o vault — as ordens concluem sozinhas depois disso.' + desde]);
+  }
+  if ((d.pendingWithdrawals || 0) > 0) {
+    w.push(['e', d.pendingWithdrawals + ' loja(s) pediram saque e estão esperando o dinheiro — aba Lojas.']);
   }
   if ((d.pendingApplications || 0) > 0) {
     w.push(['w', d.pendingApplications + ' loja(s) pedindo integração — veja a aba Lojas.']);
@@ -906,6 +931,96 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
+// ── Saques das lojas ──
+const WD_ESTADO = {
+  pendente: '<span class="warn">aguardando você</span>',
+  aprovado: '<span class="warn">convertendo</span>',
+  enviado: '<span class="ok">enviado</span>',
+  recusado: '<span class="dim">recusado</span>',
+};
+
+async function loadWithdrawals() {
+  const d = await api('/withdrawals');
+  const lista = d.withdrawals || [];
+  const pendentes = lista.filter((w) => w.status === 'pendente');
+  const total = pendentes.reduce((soma, w) => soma + Number(w.amountFiat), 0);
+
+  $('wdOut').innerHTML = pendentes.length === 0
+    ? '<span class="ok">Nenhum saque aguardando.</span>'
+    : '<b class="warn">' + pendentes.length + '</b> saque(s) aguardando · total <b class="warn">' +
+      fmt(total, 2) + ' BRL</b>';
+
+  document.querySelector('#wdTable tbody').innerHTML = lista.map((w) => {
+    const acoes = w.status === 'pendente'
+      ? '<button class="mini" data-wd-ok="' + esc(w.id) + '">aprovar</button> ' +
+        '<button class="mini ghost" data-wd-no="' + esc(w.id) + '">recusar</button>'
+      : (w.reviewNote ? '<span class="dim" style="font-size:11px">' + esc(w.reviewNote.slice(0, 40)) + '</span>' : '');
+
+    const comprovante = w.signature
+      ? '<a class="mono" style="font-size:11px" target="_blank" rel="noopener" href="https://solscan.io/tx/' +
+        esc(w.signature) + '">' + esc(w.solSent || '') + ' SOL</a>'
+      : '<span class="dim">—</span>';
+
+    return '<tr>' +
+      '<td data-l="Quando" class="mono dim">' + new Date(w.createdAt).toLocaleString() + '</td>' +
+      '<td data-l="Loja"><b>' + esc(w.merchantName) + '</b></td>' +
+      '<td data-l="Valor" class="mono warn">' + esc(w.amountFiat) + ' ' + esc(w.currency) + '</td>' +
+      '<td data-l="Carteira" class="mono" title="' + esc(w.destinationWallet) + '">' +
+        '<a target="_blank" rel="noopener" href="https://solscan.io/account/' +
+        encodeURIComponent(w.destinationWallet) + '">' + esc(short(w.destinationWallet)) + '</a></td>' +
+      '<td data-l="Estado">' + (WD_ESTADO[w.status] || esc(w.status)) + '</td>' +
+      '<td data-l="Comprovante">' + comprovante + '</td>' +
+      '<td data-l="" class="del">' + acoes + '</td></tr>';
+  }).join('') || '<tr><td colspan="7" class="dim">nenhum saque ainda</td></tr>';
+}
+
+document.addEventListener('click', async (ev) => {
+  const t = ev.target;
+  if (!t.getAttribute) return;
+
+  const okId = t.getAttribute('data-wd-ok');
+  if (okId) {
+    const dados = await ask({
+      title: 'Aprovar saque',
+      message: 'Cria a ordem que converte o valor em SOL e envia para a carteira da loja. ' +
+        'Consome float de USDC do vault — sem lastro, a ordem espera na fila de entrega.',
+      okLabel: 'Aprovar e enviar',
+      danger: true,
+      fields: [{ name: 'note', label: 'Observação (opcional)', placeholder: '' }],
+    });
+    if (dados === null) return;
+
+    t.disabled = true;
+    try {
+      const r = await api('/withdrawals/' + encodeURIComponent(okId) + '/approve', {
+        method: 'POST', body: JSON.stringify({ note: dados.note }),
+      });
+      alert('Ordem criada. Consome ' + r.usdcNeeded + ' USDC do float.\n\n' +
+            'Acompanhe na aba Operação; o saque fecha sozinho quando o SOL sair.');
+      loadAll();
+    } catch (err) { alert('Erro: ' + err.message); t.disabled = false; }
+    return;
+  }
+
+  const noId = t.getAttribute('data-wd-no');
+  if (noId) {
+    const dados = await ask({
+      title: 'Recusar saque',
+      message: 'O valor volta para o saldo da loja e o motivo fica registrado.',
+      okLabel: 'Recusar',
+      danger: true,
+      fields: [{ name: 'note', label: 'Motivo', placeholder: 'carteira suspeita, revisão pendente…' }],
+    });
+    if (dados === null) return;
+    try {
+      await api('/withdrawals/' + encodeURIComponent(noId) + '/reject', {
+        method: 'POST', body: JSON.stringify({ note: dados.note }),
+      });
+      loadAll();
+    } catch (err) { alert('Erro: ' + err.message); }
+  }
+});
+
 // ── Pedidos de integração ──
 const APP_ESTADO = {
   pendente: '<span class="warn">aguardando análise</span>',
@@ -972,6 +1087,11 @@ document.addEventListener('click', async (ev) => {
         method: 'POST', body: JSON.stringify({ note: dados.note }),
       });
       mostrarCredenciais(r.apiKey, r.webhookSecret);
+      // O acesso ao portal vai junto: é por ele que a loja vê o faturamento
+      // e pede saque, e não há e-mail automático para entregá-lo.
+      $('mPortal').classList.remove('hide');
+      $('mPortalEmail').textContent = r.portalEmail;
+      $('mPortalSenha').textContent = r.portalPassword;
       showTab('lojas');
       loadAll();
     } catch (err) { alert('Erro: ' + err.message); t.disabled = false; }
@@ -1227,7 +1347,7 @@ function setAutoRefresh(on) {
 $('autoRefresh').onchange = (e) => setAutoRefresh(e.target.checked);
 
 async function loadAll() {
-  try { await Promise.all([loadOverview(), loadSettings(), loadDeposits(), loadRecipients(), loadRuns(), loadOrders(), loadMerchants(), loadApplications()]); }
+  try { await Promise.all([loadOverview(), loadSettings(), loadDeposits(), loadRecipients(), loadRuns(), loadOrders(), loadMerchants(), loadApplications(), loadWithdrawals()]); }
   catch (e) {
     if (String(e.message).includes('unauthorized')) { sessionStorage.removeItem('adminKey'); location.reload(); }
     else console.error(e);

@@ -1,8 +1,10 @@
+import crypto from 'node:crypto';
 import type { MerchantApplication } from '@prisma/client';
 import { prisma } from '../database/client';
 import { GatewayError } from '../types';
 import { logger } from '../utils/logger';
 import { assertHttpsUrl, createMerchant } from './merchant.service';
+import { hashMerchantPassword } from './merchant-ledger.service';
 
 /**
  * Pedidos de lojas para integrar o gateway.
@@ -177,6 +179,9 @@ export interface ApprovalResult {
   /** Mostrada uma única vez. Mande para a loja por um canal seguro. */
   apiKey: string;
   webhookSecret: string;
+  /** Acesso ao portal onde a loja vê o faturamento e pede saque. */
+  portalEmail: string;
+  portalPassword: string;
 }
 
 /**
@@ -204,6 +209,19 @@ export async function approveApplication(id: string, note?: string): Promise<App
     callbackUrl: pedido.callbackUrl ?? undefined,
   });
 
+  /**
+   * Senha do portal, gerada aqui.
+   *
+   * Sem provedor de e-mail no sistema, a entrega é manual: o operador copia e
+   * manda. Gerar é melhor do que deixar a loja escolher num formulário
+   * público — ali qualquer um poderia definir a senha de uma loja alheia.
+   */
+  const senhaPortal = crypto.randomBytes(9).toString('base64url');
+  await prisma.merchant.update({
+    where: { id: criada.merchant.id },
+    data: { passwordHash: await hashMerchantPassword(senhaPortal) },
+  });
+
   await prisma.merchantApplication.update({
     where: { id },
     data: {
@@ -223,6 +241,8 @@ export async function approveApplication(id: string, note?: string): Promise<App
     merchantId: criada.merchant.id,
     apiKey: criada.apiKey,
     webhookSecret: criada.webhookSecret,
+    portalEmail: pedido.email,
+    portalPassword: senhaPortal,
   };
 }
 

@@ -369,6 +369,21 @@ model Merchant {
   /// URL padrão de notificação. A cobrança pode sobrescrever.
   callbackUrl String?
 
+  // ── Portal da loja ──
+  /// scrypt. Definida na aprovação e entregue junto com a chave de API.
+  passwordHash String?
+  /// Carteira Solana onde a loja recebe os saques. Ela mesma configura.
+  payoutWallet String?
+
+  /// Nossa comissão sobre cada venda dela, em bps. 3000 = 30%.
+  /// Snapshot por venda fica no lançamento, não aqui — mudar a comissão não
+  /// pode reescrever o passado.
+  commissionBps Int @default(3000)
+
+  sessions    MerchantSession[]
+  ledger      MerchantLedgerEntry[]
+  withdrawals MerchantWithdrawal[]
+
   active    Boolean  @default(true)
   intents   DepositIntent[]
 
@@ -418,6 +433,93 @@ model MerchantApplication {
 
   @@index([status, createdAt])
   @@index([email])
+}
+
+/// Sessão do portal da loja. Mesmo desenho da sessão de cliente: guardamos o
+/// hash do token, e a linha some para revogar o acesso.
+model MerchantSession {
+  id         String   @id @default(cuid())
+  tokenHash  String   @unique
+  merchantId String
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+  clientIp  String?
+
+  @@index([merchantId])
+  @@index([expiresAt])
+}
+
+/// Livro-razão da loja, em fiat.
+///
+/// O saldo é a SOMA dos lançamentos, nunca um número guardado e atualizado. Um
+/// campo `saldo` que se edita a cada venda diverge do histórico no primeiro
+/// erro, e aí não há como saber qual dos dois está certo. Somar é mais lento e
+/// não mente.
+model MerchantLedgerEntry {
+  id         String   @id @default(cuid())
+  merchantId String
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  /// `venda` credita, `saque` debita, `ajuste` faz os dois (sinal do valor).
+  type String
+
+  /// Positivo credita, negativo debita. Na moeda do lançamento.
+  amount   Decimal
+  currency String  @default("BRL")
+
+  /// Quanto ficou com o gateway nesta venda, e a taxa aplicada. Guardados no
+  /// lançamento porque a comissão da loja pode mudar amanhã.
+  commissionAmount Decimal?
+  commissionBps    Int?
+
+  /// Origem: a cobrança que gerou o crédito, ou o saque que gerou o débito.
+  intentId     String? @unique
+  withdrawalId String? @unique
+
+  description String?
+  createdAt   DateTime @default(now())
+
+  @@index([merchantId, createdAt])
+  @@index([type])
+}
+
+/// Pedido de saque da loja: ela pede em fiat, recebe em cripto.
+///
+/// O valor em SOL não é fixado aqui — depende da cotação no instante da
+/// conversão. Fixar no pedido criaria uma promessa que o mercado pode
+/// desmentir entre o pedido e o envio.
+model MerchantWithdrawal {
+  id         String   @id @default(cuid())
+  merchantId String
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  /// Quanto a loja pediu, em fiat.
+  amountFiat Decimal
+  currency   String  @default("BRL")
+
+  /// Carteira Solana de destino, copiada no momento do pedido — trocar a
+  /// carteira do cadastro depois não pode redirecionar um saque já pedido.
+  destinationWallet String
+
+  /// `pendente` | `aprovado` | `enviado` | `recusado`
+  status String @default("pendente")
+
+  /// Ordem que faz a conversão e o envio. Null até a aprovação.
+  orderId   String?
+  signature String?
+  /// SOL efetivamente entregue, quando concluído.
+  solSent   String?
+
+  reviewNote  String?
+  clientIp    String?
+  createdAt   DateTime  @default(now())
+  reviewedAt  DateTime?
+  completedAt DateTime?
+
+  @@index([merchantId, createdAt])
+  @@index([status, createdAt])
 }
 
 /// Lock distribuído com lease (arrendamento).

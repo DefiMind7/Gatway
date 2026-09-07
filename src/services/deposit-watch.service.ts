@@ -199,7 +199,8 @@ export async function scanOnchainDeposits(): Promise<ScanSummary> {
           summary.confirmed.push({
             reference: intent.reference,
             signature,
-            orderId: result.orderId,
+            // Venda de loja não gera ordem — o campo carrega isso honestamente.
+            orderId: result.orderId ?? '(venda de loja — sem entrega)',
           });
           // Consumida: não pode casar com outra transferência nesta varredura.
           openByAmount.set(credited.toString(), [] as unknown as typeof pending);

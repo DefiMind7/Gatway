@@ -97,6 +97,12 @@ async function main(): Promise<void> {
     note: 'selftest — nenhum fiat foi movido',
     force: true,
   });
+  if (result.orderId === null) {
+    // Venda de loja não gera ordem: o dinheiro vira saldo da loja.
+    console.log('   venda de loja confirmada (sem entrega de cripto)\n');
+    await prisma.$disconnect();
+    return;
+  }
   console.log(`   ordem ${result.orderId} criada\n`);
 
   // ── 3) A parte que nunca tinha rodado: swap + liquidação ──

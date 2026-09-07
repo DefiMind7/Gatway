@@ -5,6 +5,7 @@ import { retryPendingOrders } from './order.service';
 import { reconcilePspPayments } from './reconcile.service';
 import { expireStaleIntents } from './deposit.service';
 import { retryMerchantNotifications } from './merchant.service';
+import { syncWithdrawals } from './merchant-ledger.service';
 import { runProfitDistribution } from './payout.service';
 import { computeNextRunAt, getSettings } from './settings.service';
 
@@ -132,6 +133,9 @@ export async function startScheduler(): Promise<void> {
       // Webhook de loja que não passou na hora: o endereço dela caiu, fez
       // deploy, deu timeout. Sem repetir, o pedido fica sem liberação.
       .then(() => retryMerchantNotifications())
+      // Fecha os saques cuja ordem já liquidou: a pipeline entrega, mas não
+      // conhece o conceito de saque.
+      .then(() => syncWithdrawals())
       .then(() => pruneExpiredLocks())
       .catch((err: unknown) => log.error({ err }, 'varredura de ordens pendentes falhou'));
   }, SWEEP_INTERVAL_MS);
