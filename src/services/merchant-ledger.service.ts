@@ -6,6 +6,7 @@ import { config, LAMPORTS_PER_SOL, TOTAL_BPS } from '../config';
 import { prisma } from '../database/client';
 import { GatewayError, OrderStatus } from '../types';
 import { logger } from '../utils/logger';
+import { NotificationKind, notify } from './merchant-notify.service';
 import { getDepositRates } from './deposit.service';
 import { createOrderFromEvent, dispatchOrderPipeline } from './order.service';
 
@@ -413,6 +414,15 @@ export async function markFiatSent(
     },
   });
 
+  await notify(
+    saque.merchantId,
+    NotificationKind.SAQUE,
+    'Saque transferido',
+    `${saque.amountFiat.toString()} ${saque.currency} enviados em ${saque.payoutCurrency}` +
+      (input.note?.trim() ? ` — ${input.note.trim()}` : '') + '.',
+    'saques',
+  );
+
   log.warn({ saqueId: id, moeda: saque.payoutCurrency }, 'saque em fiat marcado como enviado');
 }
 
@@ -611,6 +621,15 @@ export async function syncWithdrawals(): Promise<{ concluidos: number }> {
         completedAt: new Date(),
       },
     });
+    await notify(
+      saque.merchantId,
+      NotificationKind.SAQUE,
+      'Saque enviado em SOL',
+      `${(Number(ordem.customerLamports ?? 0n) / LAMPORTS_PER_SOL).toFixed(6)} SOL na carteira ` +
+        `${saque.destinationWallet.slice(0, 8)}… — confira o comprovante na aba Saques.`,
+      'saques',
+    );
+
     concluidos += 1;
     log.info({ saqueId: saque.id, signature: ordem.customerPayoutSignature }, 'saque entregue');
   }
@@ -651,6 +670,15 @@ export async function rejectWithdrawal(id: string, note?: string): Promise<void>
       },
     });
   });
+
+  await notify(
+    saque.merchantId,
+    NotificationKind.SAQUE,
+    'Saque recusado',
+    (note?.trim() ? note.trim() + ' ' : '') +
+      `O valor de ${saque.amountFiat.toString()} ${saque.currency} voltou para o seu saldo.`,
+    'saques',
+  );
 
   log.warn({ saqueId: id }, 'saque recusado e valor devolvido ao saldo');
 }

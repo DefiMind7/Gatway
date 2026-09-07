@@ -306,8 +306,21 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
       <th>O que faz</th><th>Estado</th><th></th>
     </tr></thead><tbody></tbody></table></div>
     <p class="dim" style="font-size:12px;margin-bottom:0">
-      A chave de API só nasce na aprovação — e aparece uma única vez, aqui. O formulário público
-      fica em <a href="/parceiros" target="_blank" rel="noopener">/parceiros</a>.
+      Aprovar habilita a loja a cobrar e manda o aviso para o painel dela. A chave de API
+      é emitida pela própria loja em Integração — nenhuma credencial passa por aqui.
+      A porta de entrada é <a href="/parceiros" target="_blank" rel="noopener">/parceiros</a>.
+    </p>
+  </section>
+
+  <section data-tab="lojas">
+    <h2>Senhas perdidas — lojas trancadas fora do portal</h2>
+    <div id="prOut" class="dim" style="font-size:13px;margin-bottom:10px">—</div>
+    <div class="scroll"><table id="prTable"><thead><tr>
+      <th>Quando</th><th>Loja</th><th>De onde</th><th>Estado</th><th></th>
+    </tr></thead><tbody></tbody></table></div>
+    <p class="dim" style="font-size:12px;margin-bottom:0">
+      Confirme por telefone quem está pedindo antes de emitir. A senha temporária aparece
+      uma vez só e a loja é obrigada a trocá-la ao entrar.
     </p>
   </section>
 
@@ -1120,11 +1133,12 @@ document.addEventListener('click', async (ev) => {
   const aprovarId = t.getAttribute('data-approve');
   if (aprovarId) {
     const dados = await ask({
-      title: 'Aprovar e criar a loja',
-      message: 'Isso cria a loja e emite a chave de API. A chave aparece <b>uma única vez</b> — ' +
-        'copie e mande para o contato da empresa por um canal seguro.',
-      okLabel: 'Aprovar e gerar chave',
-      fields: [{ name: 'note', label: 'Observação (opcional)', placeholder: 'combinado por telefone, etc.' }],
+      title: 'Aprovar a loja',
+      message: 'A loja passa a poder cobrar e recebe o aviso no painel dela. ' +
+        'A chave de API é emitida por ela mesma, em Integração — ' +
+        'você não precisa copiar nem mandar nada.',
+      okLabel: 'Aprovar',
+      fields: [{ name: 'note', label: 'Observação (aparece para a loja)', placeholder: 'combinado por telefone, etc.' }],
     });
     if (dados === null) return;
 
@@ -1133,12 +1147,7 @@ document.addEventListener('click', async (ev) => {
       const r = await api('/applications/' + encodeURIComponent(aprovarId) + '/approve', {
         method: 'POST', body: JSON.stringify({ note: dados.note }),
       });
-      mostrarCredenciais(r.apiKey, r.webhookSecret);
-      // O acesso ao portal vai junto: é por ele que a loja vê o faturamento
-      // e pede saque, e não há e-mail automático para entregá-lo.
-      $('mPortal').classList.remove('hide');
-      $('mPortalEmail').textContent = r.portalEmail;
-      $('mPortalSenha').textContent = r.portalPassword;
+      alert(r.companyName + ' foi aprovada. O aviso já está no painel dela (' + r.portalEmail + ').');
       showTab('lojas');
       loadAll();
     } catch (err) { alert('Erro: ' + err.message); t.disabled = false; }
@@ -1149,7 +1158,8 @@ document.addEventListener('click', async (ev) => {
   if (recusarId) {
     const dados = await ask({
       title: 'Recusar pedido',
-      message: 'O motivo fica registrado no painel. Nenhuma chave é emitida.',
+      message: 'O motivo aparece no painel da loja e ela pode corrigir e pedir de novo. ' +
+        'A conta dela continua existindo.',
       okLabel: 'Recusar',
       danger: true,
       fields: [{ name: 'note', label: 'Motivo', placeholder: 'fora do perfil, dados insuficientes…' }],
@@ -1164,18 +1174,102 @@ document.addEventListener('click', async (ev) => {
   }
 });
 
+// ── Senhas perdidas ──
+const PR_ESTADO = {
+  pendente: '<span class="warn">aguardando</span>',
+  atendido: '<span class="ok">senha emitida</span>',
+  cancelado: '<span class="dim">cancelado</span>',
+};
+
+async function loadPasswordResets() {
+  const d = await api('/password-resets');
+  const lista = d.resets || [];
+  const pendentes = lista.filter((r) => r.status === 'pendente').length;
+
+  $('prOut').innerHTML = pendentes === 0
+    ? '<span class="ok">Ninguém trancado fora.</span>'
+    : '<b class="warn">' + pendentes + '</b> loja(s) esperando senha temporária';
+
+  document.querySelector('#prTable tbody').innerHTML = lista.map((r) =>
+    '<tr>' +
+    '<td data-l="Quando" class="dim">' + new Date(r.createdAt).toLocaleString() + '</td>' +
+    '<td data-l="Loja"><b>' + esc(r.merchantName) + '</b><br>' +
+      '<span class="dim" style="font-size:11px">' + esc(r.email) + '</span></td>' +
+    '<td data-l="De onde" class="mono dim">' + esc(r.clientIp || '—') + '</td>' +
+    '<td data-l="Estado">' + (PR_ESTADO[r.status] || esc(r.status)) + '</td>' +
+    '<td data-l="" class="del">' + (r.status === 'pendente'
+      ? '<button class="mini" data-pr-ok="' + esc(r.id) + '">emitir senha</button> ' +
+        '<button class="mini ghost" data-pr-no="' + esc(r.id) + '">cancelar</button>'
+      : (r.note ? '<span class="dim" style="font-size:11px">' + esc(r.note.slice(0, 40)) + '</span>' : '')) +
+    '</td></tr>'
+  ).join('') || '<tr><td colspan="5" class="dim">nenhum pedido</td></tr>';
+}
+
+document.querySelector('#prTable').addEventListener('click', async (e) => {
+  const t = e.target;
+  if (t.tagName !== 'BUTTON') return;
+
+  const emitir = t.getAttribute('data-pr-ok');
+  if (emitir) {
+    const dados = await ask({
+      title: 'Emitir senha temporária',
+      message: 'Confirme por telefone que é mesmo o dono da loja antes de emitir. ' +
+        'Todas as sessões abertas dela são encerradas, e a senha aparece <b>uma vez</b>.',
+      okLabel: 'Emitir',
+      fields: [{ name: 'note', label: 'Como confirmou (fica registrado)', placeholder: 'liguei para o telefone do cadastro' }],
+    });
+    if (dados === null) return;
+    try {
+      const r = await api('/password-resets/' + encodeURIComponent(emitir) + '/resolve', {
+        method: 'POST', body: JSON.stringify({ note: dados.note }),
+      });
+      alert('Senha temporária de ' + r.email + ':\n\n' + r.tempPassword +
+            '\n\nCopie agora. Ela não aparece de novo, e a loja precisa trocá-la ao entrar.');
+      loadPasswordResets();
+    } catch (err) { alert('Erro: ' + err.message); }
+    return;
+  }
+
+  const cancelar = t.getAttribute('data-pr-no');
+  if (cancelar) {
+    const dados = await ask({
+      title: 'Cancelar pedido',
+      message: 'Use quando não conseguir confirmar quem pediu.',
+      okLabel: 'Cancelar pedido', danger: true,
+      fields: [{ name: 'note', label: 'Motivo', placeholder: 'não consegui confirmar a identidade' }],
+    });
+    if (dados === null) return;
+    try {
+      await api('/password-resets/' + encodeURIComponent(cancelar) + '/cancel', {
+        method: 'POST', body: JSON.stringify({ note: dados.note }),
+      });
+      loadPasswordResets();
+    } catch (err) { alert('Erro: ' + err.message); }
+  }
+});
+
 // ── Lojas ──
+// O campo status é a relação comercial; active é a suspensão pelo operador. Uma
+// loja suspensa aparece como suspensa mesmo que estivesse aprovada — é essa a
+// informação que importa na hora de responder "por que ela não cobra?".
+var ESTADO_LOJA = {
+  sem_pedido: '<span class="dim">sem pedido</span>',
+  em_analise: '<span class="warn">em análise</span>',
+  aprovado: '<span class="ok">aprovada</span>',
+  recusado: '<span class="err">recusada</span>'
+};
+
 async function loadMerchants() {
   const d = await api('/merchants');
   document.querySelector('#mTable tbody').innerHTML = d.merchants.map((m) =>
     '<tr>' +
     '<td data-l="Loja"><b>' + esc(m.name) + '</b><br><span class="dim" style="font-size:11px">' + esc(m.email) + '</span></td>' +
-    '<td data-l="Chave" class="mono dim">' + esc(m.apiKeyPrefix) + '…</td>' +
+    '<td data-l="Chave" class="mono dim">' + (m.apiKeyPrefix ? esc(m.apiKeyPrefix) + '…' : 'sem chave') + '</td>' +
     '<td data-l="Webhook" class="mono dim" style="max-width:220px;overflow:hidden;text-overflow:ellipsis">' +
       esc(m.callbackUrl || '—') + '</td>' +
     '<td data-l="Cobranças" class="mono">' + m.charges + '</td>' +
     '<td data-l="Último uso" class="mono dim">' + (m.lastUsedAt ? new Date(m.lastUsedAt).toLocaleString() : 'nunca') + '</td>' +
-    '<td data-l="Estado" class="' + (m.active ? 'ok' : 'dim') + '">' + (m.active ? 'ativa' : 'desativada') + '</td>' +
+    '<td data-l="Estado">' + (m.active ? ESTADO_LOJA[m.status] || esc(m.status) : '<span class="dim">suspensa</span>') + '</td>' +
     '<td data-l="" class="del">' +
       '<button class="mini ghost" data-rotate="' + esc(m.id) + '">nova chave</button> ' +
       '<button class="mini ghost" data-toggle="' + esc(m.id) + '" data-active="' + (m.active ? '1' : '') + '">' +
@@ -1394,7 +1488,7 @@ function setAutoRefresh(on) {
 $('autoRefresh').onchange = (e) => setAutoRefresh(e.target.checked);
 
 async function loadAll() {
-  try { await Promise.all([loadOverview(), loadSettings(), loadDeposits(), loadRecipients(), loadRuns(), loadOrders(), loadMerchants(), loadApplications(), loadWithdrawals()]); }
+  try { await Promise.all([loadOverview(), loadSettings(), loadDeposits(), loadRecipients(), loadRuns(), loadOrders(), loadMerchants(), loadApplications(), loadPasswordResets(), loadWithdrawals()]); }
   catch (e) {
     if (String(e.message).includes('unauthorized')) { sessionStorage.removeItem('adminKey'); location.reload(); }
     else console.error(e);

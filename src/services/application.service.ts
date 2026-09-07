@@ -1,21 +1,24 @@
-import crypto from 'node:crypto';
-import type { MerchantApplication } from '@prisma/client';
+import type { Merchant, MerchantApplication } from '@prisma/client';
 import { prisma } from '../database/client';
 import { GatewayError } from '../types';
 import { logger } from '../utils/logger';
-import { assertHttpsUrl, createMerchant } from './merchant.service';
-import { hashMerchantPassword } from './merchant-ledger.service';
+import { assertHttpsUrl } from './merchant.service';
+import { MerchantStatus, NotificationKind, notify } from './merchant-account.service';
 
 /**
  * Pedidos de lojas para integrar o gateway.
  *
- * O formulário é público — é a porta de entrada comercial. Isso traz dois
- * problemas que o código resolve aqui:
+ * O pedido agora sai de DENTRO de uma conta já criada, e não de um formulário
+ * aberto na internet. A diferença não é burocrática:
  *
- *  • **spam**: qualquer robô que ache a página pode encher a tabela. Há limite
- *    por IP e por e-mail, e o mesmo e-mail não abre dois pedidos em aberto;
- *  • **confusão entre pedido e credencial**: um pedido não é uma loja. A chave
- *    de API só nasce na aprovação, que é um clique consciente do operador.
+ *  • o spam cai por si — para pedir é preciso ter cadastrado uma conta antes;
+ *  • existe para onde responder. O maior defeito do formulário anônimo era
+ *    não ter destinatário: aprovado ou recusado, a resposta ficava presa no
+ *    painel do operador esperando que alguém a copiasse para um e-mail.
+ *
+ * O que não mudou: um pedido não é uma loja habilitada. A chave de API só
+ * passa a ser emissível depois da aprovação, que é um clique consciente do
+ * operador.
  */
 
 const log = logger.child({ scope: 'application' });
@@ -26,8 +29,18 @@ export const ApplicationStatus = {
   RECUSADO: 'recusado',
 } as const;
 
-/** Pedidos por IP por hora. Freio de spam no endpoint público. */
-const MAX_POR_IP_HORA = 5;
+/**
+ * Pedidos que uma MESMA conta pode abrir por hora.
+ *
+ * Era um limite por IP, de quando o formulário era anônimo. Agora ele estaria
+ * no lugar errado: cinco lojas atrás do mesmo NAT — um prédio comercial, um
+ * coworking — e a sexta não conseguiria se candidatar por culpa das vizinhas.
+ * O identificador passou a ser a conta, e o freio acompanha.
+ *
+ * O spam de verdade já morreu antes: para pedir é preciso ter cadastrado uma
+ * conta, e uma conta só tem um pedido aberto de cada vez.
+ */
+const MAX_POR_LOJA_HORA = 5;
 
 const VOLUMES = [
   'até R$ 5 mil/mês',
@@ -39,8 +52,9 @@ const VOLUMES = [
 export const VOLUMES_ACEITOS: readonly string[] = VOLUMES;
 
 export interface ApplicationInput {
+  /** A conta que está pedindo. É ela que recebe a resposta. */
+  merchant: Merchant;
   companyName: string;
-  email: string;
   legalName?: string | undefined;
   taxId?: string | undefined;
   phone?: string | undefined;
@@ -63,67 +77,94 @@ function texto(valor: unknown, campo: string, { min = 0, max = 500, obrigatorio 
   return v.slice(0, max);
 }
 
-async function assertRateLimit(ip: string | undefined): Promise<void> {
-  if (!ip) return;
+async function assertRateLimit(merchantId: string): Promise<void> {
   const desde = new Date(Date.now() - 3_600_000);
   const recentes = await prisma.merchantApplication.count({
-    where: { clientIp: ip, createdAt: { gte: desde } },
+    where: { merchantId, createdAt: { gte: desde } },
   });
-  if (recentes >= MAX_POR_IP_HORA) {
+  if (recentes >= MAX_POR_LOJA_HORA) {
     throw new GatewayError(
-      'muitos pedidos deste endereço na última hora — tente mais tarde',
+      'você enviou pedidos demais na última hora — aguarde antes de tentar de novo',
       'RATE_LIMITED',
       false,
     );
   }
 }
 
-/** Registra o pedido. Não cria loja nem chave — isso é da aprovação. */
+/**
+ * Registra o pedido e coloca a conta em análise.
+ *
+ * Os dados da empresa também vão para a conta: são os mesmos campos, e mantê-los
+ * em dois lugares que divergem é pior do que copiá-los uma vez. O pedido guarda
+ * o retrato do que foi analisado; a conta guarda o valor corrente.
+ */
 export async function submitApplication(input: ApplicationInput): Promise<MerchantApplication> {
-  const companyName = texto(input.companyName, 'nome da empresa', { min: 2, obrigatorio: true });
-  const email = texto(input.email, 'e-mail', { obrigatorio: true }).toLowerCase();
+  const loja = input.merchant;
 
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email)) {
-    throw new GatewayError('e-mail inválido', 'INVALID_EMAIL', false);
-  }
-  if (input.callbackUrl) assertHttpsUrl(input.callbackUrl, 'URL de webhook');
-  if (input.website) assertHttpsUrl(input.website, 'site');
-
-  await assertRateLimit(input.clientIp);
-
-  // Um e-mail com pedido em análise não abre outro: duplicata vira fila dupla
-  // no painel e a loja acha que o primeiro se perdeu.
-  const emAberto = await prisma.merchantApplication.findFirst({
-    where: { email, status: ApplicationStatus.PENDENTE },
-  });
-  if (emAberto) {
+  if (loja.status === MerchantStatus.EM_ANALISE) {
     throw new GatewayError(
-      'já existe um pedido em análise para este e-mail — aguarde o retorno',
+      'o seu pedido já está em análise — você recebe o retorno aqui mesmo',
       'DUPLICATE_APPLICATION',
       false,
     );
   }
+  if (loja.status === MerchantStatus.APROVADO) {
+    throw new GatewayError('a sua loja já está aprovada', 'ALREADY_APPROVED', false);
+  }
 
-  const pedido = await prisma.merchantApplication.create({
-    data: {
-      companyName,
-      email,
-      legalName: texto(input.legalName, 'razão social') || null,
-      taxId: texto(input.taxId, 'CNPJ') || null,
-      phone: texto(input.phone, 'telefone') || null,
-      website: input.website ?? null,
-      callbackUrl: input.callbackUrl ?? null,
-      expectedVolume: VOLUMES_ACEITOS.includes(String(input.expectedVolume))
-        ? String(input.expectedVolume)
-        : null,
-      description: texto(input.description, 'descrição', { max: 2000 }) || null,
-      status: ApplicationStatus.PENDENTE,
-      ...(input.clientIp !== undefined ? { clientIp: input.clientIp } : {}),
-    },
-  });
+  const companyName = texto(input.companyName, 'nome da empresa', { min: 2, obrigatorio: true });
+  if (input.callbackUrl) assertHttpsUrl(input.callbackUrl, 'URL de webhook');
+  if (input.website) assertHttpsUrl(input.website, 'site');
+
+  await assertRateLimit(loja.id);
+
+  const dados = {
+    companyName,
+    email: loja.email,
+    legalName: texto(input.legalName, 'razão social') || null,
+    taxId: texto(input.taxId, 'CNPJ') || null,
+    phone: texto(input.phone, 'telefone') || null,
+    website: input.website ?? null,
+    callbackUrl: input.callbackUrl ?? null,
+    expectedVolume: VOLUMES_ACEITOS.includes(String(input.expectedVolume))
+      ? String(input.expectedVolume)
+      : null,
+    description: texto(input.description, 'descrição', { max: 2000 }) || null,
+  };
+
+  const [pedido] = await prisma.$transaction([
+    prisma.merchantApplication.create({
+      data: {
+        ...dados,
+        merchantId: loja.id,
+        status: ApplicationStatus.PENDENTE,
+        ...(input.clientIp !== undefined ? { clientIp: input.clientIp } : {}),
+      },
+    }),
+    prisma.merchant.update({
+      where: { id: loja.id },
+      data: {
+        name: companyName,
+        legalName: dados.legalName,
+        taxId: dados.taxId,
+        phone: dados.phone,
+        website: dados.website,
+        callbackUrl: dados.callbackUrl,
+        status: MerchantStatus.EM_ANALISE,
+      },
+    }),
+  ]);
+
+  await notify(
+    loja.id,
+    NotificationKind.AVISO,
+    'Pedido enviado para análise',
+    'Assim que tivermos uma resposta, ela aparece aqui no seu painel.',
+    'inicio',
+  );
 
   log.warn(
-    { id: pedido.id, empresa: companyName, email },
+    { id: pedido.id, empresa: companyName, merchantId: loja.id },
     'novo pedido de integração — aguardando análise',
   );
   return pedido;
@@ -176,83 +217,84 @@ export async function listApplications(status?: string): Promise<
 
 export interface ApprovalResult {
   merchantId: string;
-  /** Mostrada uma única vez. Mande para a loja por um canal seguro. */
-  apiKey: string;
-  webhookSecret: string;
-  /** Acesso ao portal onde a loja vê o faturamento e pede saque. */
+  companyName: string;
   portalEmail: string;
-  portalPassword: string;
 }
 
 /**
- * Aprova o pedido: cria a loja e devolve as credenciais.
+ * Aprova o pedido: a conta passa a poder emitir chave e cobrar.
  *
- * É aqui que uma intenção vira capacidade de cobrar. A chave aparece uma vez
- * só — o banco guarda apenas o hash — então o operador precisa copiá-la agora.
+ * Repare no que este passo NÃO faz mais: não cria loja (ela já existe desde o
+ * cadastro), não gera senha (o dono escolheu a dele) e não devolve a chave de
+ * API. A chave é emitida pela própria loja, no painel dela, quando quiser — é
+ * o único desenho em que a credencial nunca precisa passar pelas mãos do
+ * operador nem por uma mensagem de WhatsApp para chegar a quem é dela.
+ *
+ * O que ele faz é o que faltava: avisa. A loja abre o painel e encontra a
+ * resposta lá.
  */
 export async function approveApplication(id: string, note?: string): Promise<ApprovalResult> {
   const pedido = await prisma.merchantApplication.findUnique({ where: { id } });
   if (!pedido) throw new GatewayError('pedido não encontrado', 'NOT_FOUND', false);
 
   if (pedido.status === ApplicationStatus.APROVADO) {
+    throw new GatewayError('este pedido já foi aprovado', 'ALREADY_APPROVED', false);
+  }
+  if (!pedido.merchantId) {
     throw new GatewayError(
-      'este pedido já foi aprovado — a chave dele existe e não é recuperável. ' +
-        'Se a loja perdeu, gere outra em Lojas.',
-      'ALREADY_APPROVED',
+      'este pedido é anterior ao cadastro de contas e não tem loja associada — ' +
+        'peça que ela crie a conta em /loja e envie o pedido de novo',
+      'LEGACY_APPLICATION',
       false,
     );
   }
 
-  const criada = await createMerchant({
-    name: pedido.companyName,
-    email: pedido.email,
-    callbackUrl: pedido.callbackUrl ?? undefined,
-  });
+  const loja = await prisma.merchant.findUnique({ where: { id: pedido.merchantId } });
+  if (!loja) throw new GatewayError('a conta deste pedido não existe mais', 'NOT_FOUND', false);
 
-  /**
-   * Senha do portal, gerada aqui.
-   *
-   * Sem provedor de e-mail no sistema, a entrega é manual: o operador copia e
-   * manda. Gerar é melhor do que deixar a loja escolher num formulário
-   * público — ali qualquer um poderia definir a senha de uma loja alheia.
-   */
-  const senhaPortal = crypto.randomBytes(9).toString('base64url');
-  await prisma.merchant.update({
-    where: { id: criada.merchant.id },
-    data: { passwordHash: await hashMerchantPassword(senhaPortal) },
-  });
+  await prisma.$transaction([
+    prisma.merchantApplication.update({
+      where: { id },
+      data: {
+        status: ApplicationStatus.APROVADO,
+        reviewNote: note?.trim() || null,
+        reviewedAt: new Date(),
+      },
+    }),
+    prisma.merchant.update({
+      where: { id: loja.id },
+      data: { status: MerchantStatus.APROVADO, active: true },
+    }),
+  ]);
 
-  await prisma.merchantApplication.update({
-    where: { id },
-    data: {
-      status: ApplicationStatus.APROVADO,
-      merchantId: criada.merchant.id,
-      reviewNote: note?.trim() || null,
-      reviewedAt: new Date(),
-    },
-  });
-
-  log.warn(
-    { id, empresa: pedido.companyName, merchantId: criada.merchant.id },
-    'pedido aprovado — loja criada',
+  await notify(
+    loja.id,
+    NotificationKind.APROVADO,
+    'Pedido aprovado — sua loja está habilitada',
+    (note?.trim() ? note.trim() + ' ' : '') +
+      'Emita a sua chave de API na aba Integração para começar a cobrar.',
+    'integracao',
   );
 
-  return {
-    merchantId: criada.merchant.id,
-    apiKey: criada.apiKey,
-    webhookSecret: criada.webhookSecret,
-    portalEmail: pedido.email,
-    portalPassword: senhaPortal,
-  };
+  log.warn({ id, empresa: pedido.companyName, merchantId: loja.id }, 'pedido aprovado');
+
+  return { merchantId: loja.id, companyName: loja.name, portalEmail: loja.email };
 }
 
+/**
+ * Recusa. A conta continua existindo e o dono continua entrando.
+ *
+ * Ele precisa poder ler o motivo e corrigir — apagar a conta junto com a
+ * recusa transformaria "faltou o CNPJ" em "comece tudo de novo do zero".
+ */
 export async function rejectApplication(id: string, note?: string): Promise<void> {
   const pedido = await prisma.merchantApplication.findUnique({ where: { id } });
   if (!pedido) throw new GatewayError('pedido não encontrado', 'NOT_FOUND', false);
 
   if (pedido.status === ApplicationStatus.APROVADO) {
     throw new GatewayError(
-      'este pedido já foi aprovado e a loja existe — desative a loja em vez de recusar o pedido',
+      'este pedido já foi aprovado e a loja está habilitada — suspenda a loja em Lojas ' +
+        'em vez de recusar o pedido',
       'ALREADY_APPROVED',
       false,
     );
@@ -266,6 +308,21 @@ export async function rejectApplication(id: string, note?: string): Promise<void
       reviewedAt: new Date(),
     },
   });
+
+  if (pedido.merchantId) {
+    await prisma.merchant.update({
+      where: { id: pedido.merchantId },
+      data: { status: MerchantStatus.RECUSADO },
+    });
+    await notify(
+      pedido.merchantId,
+      NotificationKind.RECUSADO,
+      'Pedido não aprovado',
+      note?.trim() ||
+        'Confira os dados da empresa e envie um novo pedido. Se tiver dúvida, fale com o suporte.',
+      'pedido',
+    );
+  }
 
   log.warn({ id, empresa: pedido.companyName }, 'pedido recusado');
 }

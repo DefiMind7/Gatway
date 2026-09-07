@@ -10,7 +10,6 @@ import {
   authenticateMerchant,
   toChargeView,
 } from '../services/merchant.service';
-import { submitApplication } from '../services/application.service';
 import { ah } from '../utils/async-route';
 
 /**
@@ -57,35 +56,13 @@ async function requireMerchant(
 }
 
 /**
- * Candidatura de loja — o único endpoint público desta API.
+ * Aqui não há endpoint público.
  *
- * Fica ANTES do middleware de autenticação de propósito: quem se candidata
- * ainda não tem chave, e é justamente isso que está pedindo.
+ * A candidatura morava neste arquivo, aberta a qualquer um. Ela mudou de lugar
+ * para `/loja/api/application`, atrás do login: sem conta não havia para onde
+ * mandar a resposta da análise, e "a resposta vai por e-mail" era uma promessa
+ * que o sistema não tinha como cumprir.
  */
-router.post('/applications', ah(async (req: Request, res: Response) => {
-  const body = (req.body ?? {}) as Record<string, string | undefined>;
-
-  const pedido = await submitApplication({
-    companyName: String(body.companyName ?? ''),
-    email: String(body.email ?? ''),
-    legalName: body.legalName,
-    taxId: body.taxId,
-    phone: body.phone,
-    website: body.website,
-    callbackUrl: body.callbackUrl,
-    expectedVolume: body.expectedVolume,
-    description: body.description,
-    clientIp: req.ip,
-  });
-
-  // Devolve o mínimo: id para referência e o e-mail para a tela confirmar.
-  res.status(201).json({
-    id: pedido.id,
-    status: pedido.status,
-    email: pedido.email,
-    message: 'Pedido recebido. A resposta vai por e-mail.',
-  });
-}));
 
 router.use(ah(requireMerchant as never));
 

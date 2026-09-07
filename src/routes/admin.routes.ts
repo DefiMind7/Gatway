@@ -68,6 +68,12 @@ import {
 } from '../services/settings.service';
 import { getBalance, getTokenBalanceRaw, lamportsToSol } from '../services/solana.service';
 import { ADMIN_PAGE_HTML } from './admin.page';
+import {
+  cancelPasswordReset,
+  countPendingResets,
+  listPasswordResets,
+  resolvePasswordReset,
+} from '../services/merchant-account.service';
 import { ah } from '../utils/async-route';
 
 /**
@@ -184,8 +190,16 @@ router.get('/api/overview', ah(async (_req: Request, res: Response) => {
       getTokenBalanceRaw(config.swap.inputMint).catch(() => null),
     ]);
 
-  const [retained, float, pending, gas, orphans, pedidosPendentes, saquesPendentes] =
-    await Promise.all([
+  const [
+    retained,
+    float,
+    pending,
+    gas,
+    orphans,
+    pedidosPendentes,
+    saquesPendentes,
+    senhasPendentes,
+  ] = await Promise.all([
     getRetainedFiatTotals(),
     getFloatStatus(),
     getPendingDelivery(),
@@ -194,6 +208,7 @@ router.get('/api/overview', ah(async (_req: Request, res: Response) => {
     findOrphanPayments().catch(() => []),
     countPending(),
     prisma.merchantWithdrawal.count({ where: { status: 'pendente' } }),
+    countPendingResets(),
   ]);
   const decimals = config.swap.inputMintDecimals;
 
@@ -275,6 +290,8 @@ router.get('/api/overview', ah(async (_req: Request, res: Response) => {
     pendingApplications: pedidosPendentes,
     /** Lojas esperando o dinheiro delas sair. */
     pendingWithdrawals: saquesPendentes,
+    /** Lojas trancadas fora do portal esperando senha temporária. */
+    pendingPasswordResets: senhasPendentes,
     warnings: {
       partialRuns: partial,
       vaultBelowReserve:
@@ -688,6 +705,33 @@ router.post('/api/applications/:id/approve', ah(async (req: Request, res: Respon
 router.post('/api/applications/:id/reject', ah(async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as { note?: string };
   await rejectApplication(String(req.params.id ?? ''), body.note);
+  res.json({ ok: true });
+}));
+
+// ─────────────────────── Recuperação de senha das lojas ───────────────────────
+
+/**
+ * A fila de quem perdeu a senha.
+ *
+ * Sem provedor de e-mail não há link mágico, então quem confere a identidade é
+ * o operador. O custo disso é humano e conhecido; a alternativa — um "enviamos
+ * um e-mail" que nunca chega — deixaria a loja trancada sem saber por quê.
+ */
+router.get('/api/password-resets', ah(async (_req: Request, res: Response) => {
+  res.json({ resets: await listPasswordResets() });
+}));
+
+/** Emite senha temporária. A loja é obrigada a trocá-la ao entrar. */
+router.post('/api/password-resets/:id/resolve', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { note?: string };
+  const r = await resolvePasswordReset(String(req.params.id ?? ''), body.note);
+  log.warn({ email: r.email }, 'senha temporária emitida pelo operador');
+  res.json(r);
+}));
+
+router.post('/api/password-resets/:id/cancel', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { note?: string };
+  await cancelPasswordReset(String(req.params.id ?? ''), body.note);
   res.json({ ok: true });
 }));
 

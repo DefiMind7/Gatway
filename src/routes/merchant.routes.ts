@@ -1,4 +1,3 @@
-import crypto from 'node:crypto';
 import { Router, type Request, type Response } from 'express';
 import type { Merchant } from '@prisma/client';
 import { PublicKey } from '@solana/web3.js';
@@ -11,18 +10,35 @@ import {
   listWithdrawals,
   MOEDAS_SAQUE,
   requestWithdrawal,
-  verifyMerchantPassword,
 } from '../services/merchant-ledger.service';
+import {
+  changePassword,
+  issueApiKey,
+  listNotifications,
+  listSessions,
+  login,
+  logout,
+  markNotificationsRead,
+  MerchantStatus,
+  requestPasswordReset,
+  resolveSession,
+  revokeOtherSessions,
+  rotateWebhookSecret,
+  signUp,
+  updateProfile,
+} from '../services/merchant-account.service';
+import { submitApplication, VOLUMES_ACEITOS } from '../services/application.service';
 import { MERCHANT_PAGE_HTML } from './merchant.page';
 import { ah } from '../utils/async-route';
 
 /**
  * Portal da loja — `/loja`.
  *
- * É onde o dono da loja acompanha o faturamento e pede o saque. Separado do
- * painel do operador de propósito: são pessoas diferentes, com poderes
- * diferentes, e misturar as duas telas seria a forma mais rápida de dar a uma
- * loja acesso ao que não é dela.
+ * É onde o dono da loja cria a conta, pede a análise, recebe a resposta, emite
+ * a chave, acompanha o faturamento e pede saque. Separado do painel do
+ * operador de propósito: são pessoas diferentes, com poderes diferentes, e
+ * misturar as duas telas seria a forma mais rápida de dar a uma loja acesso ao
+ * que não é dela.
  *
  * A autenticação é por sessão, não pela chave de API: a chave é do servidor da
  * loja e vive em configuração; o portal é do humano e vive no navegador. Usar
@@ -33,36 +49,52 @@ import { ah } from '../utils/async-route';
 const router: Router = Router();
 const log = logger.child({ scope: 'merchant.portal' });
 
-const SESSION_DAYS = 14;
-
-function hashToken(token: string): string {
-  return crypto.createHash('sha256').update(token).digest('hex');
-}
-
-async function autenticar(req: Request): Promise<Merchant | null> {
+function tokenDaRequisicao(req: Request): string {
   const header = req.headers['x-merchant-session'];
-  const token = typeof header === 'string' ? header : '';
-  if (!token) return null;
-
-  const sessao = await prisma.merchantSession.findUnique({
-    where: { tokenHash: hashToken(token) },
-    include: { merchant: true },
-  });
-
-  if (!sessao) return null;
-  if (sessao.expiresAt.getTime() < Date.now()) {
-    await prisma.merchantSession.delete({ where: { id: sessao.id } }).catch(() => undefined);
-    return null;
-  }
-  if (!sessao.merchant.active) return null;
-
-  return sessao.merchant;
+  return typeof header === 'string' ? header : '';
 }
 
-async function exigirLoja(req: Request): Promise<Merchant> {
-  const loja = await autenticar(req);
+interface Sessao {
+  loja: Merchant;
+  token: string;
+}
+
+async function exigirLoja(req: Request): Promise<Sessao> {
+  const token = tokenDaRequisicao(req);
+  const loja = await resolveSession(token);
   if (!loja) throw new GatewayError('faça login para continuar', 'UNAUTHENTICATED', false);
-  return loja;
+  return { loja, token };
+}
+
+/**
+ * Como `exigirLoja`, mas barra quem está com senha temporária.
+ *
+ * Uma senha emitida pelo operador passou por um canal que não é secreto — ele
+ * a leu, digitou, mandou por alguma mensagem. Enquanto ela valer, a conta está
+ * a um vazamento de distância de qualquer um: por isso a única porta aberta é
+ * a troca de senha, e nada que mexa em dinheiro ou credencial.
+ */
+async function exigirLojaLiberada(req: Request): Promise<Sessao> {
+  const sessao = await exigirLoja(req);
+  if (sessao.loja.mustChangePassword) {
+    throw new GatewayError(
+      'troque a sua senha temporária antes de continuar',
+      'PASSWORD_CHANGE_REQUIRED',
+      false,
+    );
+  }
+  return sessao;
+}
+
+/** Só lojas aprovadas cobram — e só elas emitem chave. */
+function exigirAprovada(loja: Merchant): void {
+  if (loja.status !== MerchantStatus.APROVADO) {
+    throw new GatewayError(
+      'a sua loja ainda não foi aprovada para cobrar',
+      'NOT_APPROVED',
+      false,
+    );
+  }
 }
 
 /** A página em si é estática; o estado vem de /loja/api/*. */
@@ -70,52 +102,77 @@ router.get('/', (_req: Request, res: Response) => {
   res.type('html').send(MERCHANT_PAGE_HTML);
 });
 
-// ─────────────────────────── Sessão ───────────────────────────
+// ─────────────────────────── Conta e sessão ───────────────────────────
+
+router.post('/api/signup', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { email?: string; companyName?: string; password?: string };
+
+  await signUp({
+    email: String(body.email ?? ''),
+    companyName: String(body.companyName ?? ''),
+    password: String(body.password ?? ''),
+    clientIp: req.ip,
+  });
+
+  // Entra direto: pedir para fazer login logo depois de criar a conta é um
+  // passo que só existe para o sistema, não para quem acabou de se cadastrar.
+  const sessao = await login(String(body.email ?? ''), String(body.password ?? ''), req.ip);
+  res.status(201).json({ token: sessao.token, name: sessao.merchant.name });
+}));
 
 router.post('/api/login', ah(async (req: Request, res: Response) => {
   const body = (req.body ?? {}) as { email?: string; password?: string };
-  const email = String(body.email ?? '').trim().toLowerCase();
-  const senha = String(body.password ?? '');
-
-  const loja = await prisma.merchant.findFirst({ where: { email } });
-
-  // Mesma resposta para loja inexistente, senha errada e loja sem portal:
-  // distinguir os casos entrega um mapa de quem existe.
-  const invalido = new GatewayError('e-mail ou senha incorretos', 'INVALID_CREDENTIALS', false);
-  if (!loja || !loja.passwordHash || !loja.active) throw invalido;
-  if (!(await verifyMerchantPassword(senha, loja.passwordHash))) throw invalido;
-
-  const token = crypto.randomBytes(32).toString('base64url');
-  await prisma.merchantSession.create({
-    data: {
-      tokenHash: hashToken(token),
-      merchantId: loja.id,
-      expiresAt: new Date(Date.now() + SESSION_DAYS * 24 * 3_600_000),
-      ...(req.ip !== undefined ? { clientIp: req.ip } : {}),
-    },
+  const sessao = await login(String(body.email ?? ''), String(body.password ?? ''), req.ip);
+  res.json({
+    token: sessao.token,
+    name: sessao.merchant.name,
+    email: sessao.merchant.email,
+    mustChangePassword: sessao.merchant.mustChangePassword,
   });
-
-  log.info({ merchantId: loja.id }, 'loja entrou no portal');
-  res.json({ token, name: loja.name, email: loja.email });
 }));
 
 router.post('/api/logout', ah(async (req: Request, res: Response) => {
-  const header = req.headers['x-merchant-session'];
-  if (typeof header === 'string' && header) {
-    await prisma.merchantSession
-      .delete({ where: { tokenHash: hashToken(header) } })
-      .catch(() => undefined);
-  }
+  await logout(tokenDaRequisicao(req));
   res.json({ ok: true });
+}));
+
+/**
+ * Recuperação de senha.
+ *
+ * Responde sempre `ok`, exista a conta ou não. Sem provedor de e-mail, o
+ * pedido cai na fila do operador — a tela diz isso com todas as letras em vez
+ * de fingir que mandou uma mensagem.
+ */
+router.post('/api/password/forgot', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { email?: string };
+  await requestPasswordReset(String(body.email ?? ''), req.ip);
+  res.json({ ok: true });
+}));
+
+router.post('/api/password', ah(async (req: Request, res: Response) => {
+  const { loja, token } = await exigirLoja(req);
+  const body = (req.body ?? {}) as { current?: string; next?: string };
+  await changePassword(loja, String(body.current ?? ''), String(body.next ?? ''), token);
+  res.json({ ok: true });
+}));
+
+router.get('/api/sessions', ah(async (req: Request, res: Response) => {
+  const { loja, token } = await exigirLojaLiberada(req);
+  res.json({ sessions: await listSessions(loja.id, token) });
+}));
+
+router.post('/api/sessions/revoke', ah(async (req: Request, res: Response) => {
+  const { loja, token } = await exigirLojaLiberada(req);
+  res.json({ revoked: await revokeOtherSessions(loja.id, token) });
 }));
 
 // ─────────────────────────── Painel da loja ───────────────────────────
 
-/** Faturamento, saldo e as últimas vendas. */
+/** Estado da conta, faturamento, saldo, saques, vendas e avisos. */
 router.get('/api/dashboard', ah(async (req: Request, res: Response) => {
-  const loja = await exigirLoja(req);
+  const { loja } = await exigirLoja(req);
 
-  const [saldo, extrato, saques, vendas] = await Promise.all([
+  const [saldo, extrato, saques, vendas, avisos, pedido] = await Promise.all([
     getBalance(loja.id),
     getLedger(loja.id, 30),
     listWithdrawals({ merchantId: loja.id, limit: 20 }),
@@ -133,21 +190,52 @@ router.get('/api/dashboard', ah(async (req: Request, res: Response) => {
         confirmedAt: true,
       },
     }),
+    listNotifications(loja.id, 30),
+    prisma.merchantApplication.findFirst({
+      where: { merchantId: loja.id },
+      orderBy: { createdAt: 'desc' },
+    }),
   ]);
 
   res.json({
     merchant: {
       name: loja.name,
       email: loja.email,
+      legalName: loja.legalName,
+      taxId: loja.taxId,
+      phone: loja.phone,
+      website: loja.website,
+      status: loja.status,
+      active: loja.active,
+      mustChangePassword: loja.mustChangePassword,
       payoutWallet: loja.payoutWallet,
       preferredPayout: loja.preferredPayout,
       payoutCurrency: loja.payoutCurrency,
       payoutFiatDetails: loja.payoutFiatDetails,
       currencies: MOEDAS_SAQUE,
+      volumes: VOLUMES_ACEITOS,
       commissionBps: loja.commissionBps,
       apiKeyPrefix: loja.apiKeyPrefix,
+      apiKeyIssuedAt: loja.apiKeyIssuedAt?.toISOString() ?? null,
       callbackUrl: loja.callbackUrl,
+      returnUrl: loja.returnUrl,
+      createdAt: loja.createdAt.toISOString(),
+      lastLoginAt: loja.lastLoginAt?.toISOString() ?? null,
+      passwordChangedAt: loja.passwordChangedAt?.toISOString() ?? null,
     },
+    application: pedido
+      ? {
+          id: pedido.id,
+          status: pedido.status,
+          reviewNote: pedido.reviewNote,
+          createdAt: pedido.createdAt.toISOString(),
+          reviewedAt: pedido.reviewedAt?.toISOString() ?? null,
+          expectedVolume: pedido.expectedVolume,
+          description: pedido.description,
+        }
+      : null,
+    notifications: avisos,
+    unread: avisos.filter((a) => !a.read).length,
     balance: saldo,
     ledger: extrato,
     withdrawals: saques.map((s) => ({
@@ -175,6 +263,92 @@ router.get('/api/dashboard', ah(async (req: Request, res: Response) => {
   });
 }));
 
+// ─────────────────────────── Pedido de análise ───────────────────────────
+
+/**
+ * Envia o pedido de integração.
+ *
+ * Atrás do login, e é essa a diferença que importa: o pedido tem dono, e a
+ * resposta tem para onde ir.
+ */
+router.post('/api/application', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  const body = (req.body ?? {}) as Record<string, string | undefined>;
+
+  const pedido = await submitApplication({
+    merchant: loja,
+    companyName: String(body.companyName ?? loja.name),
+    legalName: body.legalName,
+    taxId: body.taxId,
+    phone: body.phone,
+    website: body.website,
+    callbackUrl: body.callbackUrl,
+    expectedVolume: body.expectedVolume,
+    description: body.description,
+    clientIp: req.ip,
+  });
+
+  res.status(201).json({ id: pedido.id, status: pedido.status });
+}));
+
+// ─────────────────────────── Avisos ───────────────────────────
+
+router.post('/api/notifications/read', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLoja(req);
+  const body = (req.body ?? {}) as { id?: string };
+  await markNotificationsRead(loja.id, body.id);
+  res.json({ ok: true });
+}));
+
+// ─────────────────────────── Integração ───────────────────────────
+
+/**
+ * Emite a chave de API — a resposta traz a chave EM CLARO, uma única vez.
+ *
+ * Depois daqui ela só existe como hash. É por isso que a tela obriga a copiar
+ * antes de fechar: não há segunda chance, só uma nova emissão.
+ */
+router.post('/api/api-key', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  exigirAprovada(loja);
+
+  const { apiKey, prefix, rotated } = await issueApiKey(loja.id);
+  log.warn({ merchantId: loja.id, rotated }, 'loja emitiu chave pelo portal');
+  res.json({ apiKey, prefix, rotated });
+}));
+
+/** O segredo de webhook pode ser relido: a loja precisa dele em configuração. */
+router.get('/api/webhook-secret', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  exigirAprovada(loja);
+  res.json({ webhookSecret: loja.webhookSecret });
+}));
+
+router.post('/api/webhook-secret', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  exigirAprovada(loja);
+  res.json({ webhookSecret: await rotateWebhookSecret(loja.id) });
+}));
+
+// ─────────────────────────── Perfil ───────────────────────────
+
+router.post('/api/profile', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  const body = (req.body ?? {}) as Record<string, string | undefined>;
+
+  const atualizada = await updateProfile(loja.id, {
+    companyName: body.companyName,
+    legalName: body.legalName,
+    taxId: body.taxId,
+    phone: body.phone,
+    website: body.website,
+    callbackUrl: body.callbackUrl,
+    returnUrl: body.returnUrl,
+  });
+
+  res.json({ ok: true, name: atualizada.name });
+}));
+
 /**
  * Como a loja quer receber.
  *
@@ -183,7 +357,7 @@ router.get('/api/dashboard', ah(async (req: Request, res: Response) => {
  * que ela quisesse mudar.
  */
 router.post('/api/payout-settings', ah(async (req: Request, res: Response) => {
-  const loja = await exigirLoja(req);
+  const { loja } = await exigirLojaLiberada(req);
   const body = (req.body ?? {}) as {
     wallet?: string;
     preferred?: string;
@@ -246,7 +420,7 @@ router.post('/api/payout-settings', ah(async (req: Request, res: Response) => {
  * para SOL acontece só na aprovação do operador, pela cotação daquele momento.
  */
 router.post('/api/withdrawals', ah(async (req: Request, res: Response) => {
-  const loja = await exigirLoja(req);
+  const { loja } = await exigirLojaLiberada(req);
   const body = (req.body ?? {}) as {
     amount?: number;
     method?: string;

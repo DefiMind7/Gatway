@@ -41,6 +41,18 @@ export interface CreatedMerchant {
   webhookSecret: string;
 }
 
+/**
+ * Cria loja já habilitada, direto pelo operador.
+ *
+ * É o atalho para o caso em que a relação foi fechada fora do sistema (uma
+ * loja que o operador conhece, um piloto combinado por telefone) e refazer o
+ * caminho de cadastro + pedido + aprovação seria cerimônia sem ganho.
+ *
+ * O caminho normal — e o único aberto ao público — continua sendo a conta em
+ * /loja: ver `signUp` e `approveApplication`. Aqui não há senha de portal: a
+ * loja usa "esqueci a senha" para ganhar acesso ao painel, ou o operador emite
+ * uma temporária.
+ */
 export async function createMerchant(input: {
   name: string;
   email: string;
@@ -66,6 +78,8 @@ export async function createMerchant(input: {
       email,
       apiKeyHash: hashKey(apiKey),
       apiKeyPrefix: apiKey.slice(0, 16),
+      apiKeyIssuedAt: new Date(),
+      status: 'aprovado',
       webhookSecret,
       ...(input.callbackUrl !== undefined ? { callbackUrl: input.callbackUrl } : {}),
     },
@@ -86,6 +100,9 @@ export async function authenticateMerchant(apiKey: string): Promise<Merchant | n
 
   const merchant = await prisma.merchant.findUnique({ where: { apiKeyHash: hashKey(apiKey) } });
   if (!merchant || !merchant.active) return null;
+  // Uma chave de loja suspensa ou ainda não aprovada não cobra: o estado da
+  // relação comercial manda, não a existência da credencial.
+  if (merchant.status !== 'aprovado') return null;
 
   // Só para o painel mostrar quais lojas estão de fato integrando.
   void prisma.merchant
@@ -115,7 +132,8 @@ export async function listMerchants(): Promise<
     id: string;
     name: string;
     email: string;
-    apiKeyPrefix: string;
+    apiKeyPrefix: string | null;
+    status: string;
     active: boolean;
     callbackUrl: string | null;
     charges: number;
@@ -136,6 +154,7 @@ export async function listMerchants(): Promise<
     name: m.name,
     email: m.email,
     apiKeyPrefix: m.apiKeyPrefix,
+    status: m.status,
     active: m.active,
     callbackUrl: m.callbackUrl,
     charges: byId.get(m.id) ?? 0,

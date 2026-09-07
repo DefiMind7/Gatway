@@ -354,13 +354,33 @@ model Withdrawal {
 model Merchant {
   id   String @id @default(cuid())
   name String
-  email String
+  /// Login do portal. UNIQUE porque é a identidade da conta, não um contato.
+  email String @unique
 
-  /// SHA-256 da chave de API. A chave em claro é mostrada UMA vez, na criação.
+  // ── Perfil da empresa (editável pela própria loja) ──
+  legalName String?
+  taxId     String?
+  phone     String?
+  website   String?
+
+  /// Ciclo de vida da conta:
+  ///   sem_pedido -> em_analise -> aprovado | recusado
+  ///
+  /// Separado de `active` de propósito. `status` é a relação comercial (a loja
+  /// já pode cobrar?); `active` é a chave de luz do operador (suspender uma
+  /// loja aprovada sem apagar o histórico dela). Misturar os dois obrigaria a
+  /// desativar a conta para negar um pedido — e aí o dono não conseguiria nem
+  /// entrar para ler o motivo.
+  status String @default("sem_pedido")
+
+  /// SHA-256 da chave de API. A chave em claro aparece UMA vez, na emissão.
   /// Guardar o hash é o que impede que um dump do banco vire acesso às lojas.
-  apiKeyHash   String @unique
+  ///
+  /// Nula até a loja emitir a primeira: a conta existe antes da credencial.
+  apiKeyHash   String? @unique
   /// Prefixo visível (sk_live_a1b2…), só para a loja reconhecer qual chave é.
-  apiKeyPrefix String
+  apiKeyPrefix String?
+  apiKeyIssuedAt DateTime?
 
   /// Segredo com que assinamos os webhooks enviados a esta loja. Ela usa o
   /// mesmo para verificar que a notificação veio de nós.
@@ -368,10 +388,20 @@ model Merchant {
 
   /// URL padrão de notificação. A cobrança pode sobrescrever.
   callbackUrl String?
+  /// Para onde devolver o cliente depois de pagar. A cobrança pode sobrescrever.
+  returnUrl   String?
 
   // ── Portal da loja ──
-  /// scrypt. Definida na aprovação e entregue junto com a chave de API.
+  /// scrypt. Escolhida pelo dono da loja no cadastro.
   passwordHash String?
+  passwordChangedAt DateTime?
+  /// true depois de uma senha temporária emitida pelo operador: a loja entra,
+  /// mas a única coisa que consegue fazer é trocar a senha.
+  mustChangePassword Boolean @default(false)
+
+  /// Freio de força bruta no login. Zerado a cada entrada bem-sucedida.
+  failedLogins Int       @default(0)
+  lockedUntil  DateTime?
   /// Carteira Solana onde a loja recebe os saques em cripto.
   payoutWallet String?
   /// Como a loja prefere receber: `SOL` ou `FIAT`.
@@ -386,18 +416,24 @@ model Merchant {
   /// pode reescrever o passado.
   commissionBps Int @default(3000)
 
-  sessions    MerchantSession[]
-  ledger      MerchantLedgerEntry[]
-  withdrawals MerchantWithdrawal[]
+  sessions      MerchantSession[]
+  ledger        MerchantLedgerEntry[]
+  withdrawals   MerchantWithdrawal[]
+  notifications MerchantNotification[]
+  applications  MerchantApplication[]
+  passwordResets MerchantPasswordReset[]
 
   active    Boolean  @default(true)
   intents   DepositIntent[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
-  lastUsedAt DateTime?
+  lastUsedAt  DateTime?
+  lastLoginAt DateTime?
+  clientIp    String?
 
   @@index([active])
+  @@index([status])
 }
 
 /// Pedido de uma loja para usar o gateway como checkout.
@@ -430,8 +466,11 @@ model MerchantApplication {
   /// Anotação do operador — motivo da recusa, ou observação da aprovação.
   reviewNote String?
 
-  /// Preenchido na aprovação: a loja que nasceu deste pedido.
-  merchantId String? @unique
+  /// A conta que abriu o pedido. Não é mais UNIQUE: uma loja recusada precisa
+  /// poder corrigir o que faltou e pedir de novo, e o histórico das tentativas
+  /// é justamente o que o operador quer ver na segunda análise.
+  merchantId String?
+  merchant   Merchant? @relation(fields: [merchantId], references: [id], onDelete: Cascade)
 
   clientIp   String?
   createdAt  DateTime  @default(now())
@@ -439,6 +478,53 @@ model MerchantApplication {
 
   @@index([status, createdAt])
   @@index([email])
+  @@index([merchantId, createdAt])
+}
+
+/// Aviso para a loja, dentro do próprio painel dela.
+///
+/// Existe porque não há provedor de e-mail no sistema: sem isto, uma aprovação
+/// só chegaria à loja se o operador se lembrasse de mandar mensagem. O painel
+/// é o único canal que temos garantido — e é onde o dono da loja já vai olhar.
+model MerchantNotification {
+  id         String   @id @default(cuid())
+  merchantId String
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  /// `aprovado` | `recusado` | `chave` | `senha` | `saque` | `aviso`
+  kind  String
+  title String
+  body  String?
+  /// Para onde o aviso leva quando clicado (aba do painel).
+  link  String?
+
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([merchantId, readAt])
+  @@index([merchantId, createdAt])
+}
+
+/// Pedido de recuperação de senha.
+///
+/// Sem provedor de e-mail, o link mágico não existe: o pedido vira uma linha na
+/// fila do operador, que confere quem é e emite uma senha temporária. É mais
+/// lento e é honesto — melhor do que um "enviamos um e-mail" que nunca chega.
+model MerchantPasswordReset {
+  id         String   @id @default(cuid())
+  merchantId String
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  /// `pendente` | `atendido` | `cancelado`
+  status   String  @default("pendente")
+  clientIp String?
+  note     String?
+
+  createdAt  DateTime  @default(now())
+  resolvedAt DateTime?
+
+  @@index([status, createdAt])
+  @@index([merchantId])
 }
 
 /// Sessão do portal da loja. Mesmo desenho da sessão de cliente: guardamos o
