@@ -79,7 +79,7 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
     <button id="entrar">Entrar</button>
     <p class="dim" style="font-size:12px;margin:14px 0 0">
       As credenciais são enviadas quando o seu pedido de integração é aprovado.
-      Ainda não pediu? <a href="/parceiros" style="color:var(--acc)">comece aqui</a>.
+      Ainda não pediu? <a href="/parceiros" style="color:var(--acc)">faça vendas conosco</a>.
     </p>
   </section>
 

@@ -9,6 +9,7 @@ import pwaRoutes from './routes/pwa.routes';
 import apiRoutes from './routes/api.routes';
 import { DOCS_PAGE_HTML } from './routes/docs.page';
 import { PARTNER_PAGE_HTML } from './routes/partner.page';
+import { HOME_PAGE_HTML } from './routes/home.page';
 import merchantRoutes from './routes/merchant.routes';
 import healthRoutes from './routes/health.routes';
 import quoteRoutes from './routes/quote.routes';
@@ -60,6 +61,16 @@ export function createApp(): Application {
   // Documentação da API — pública, é o que a loja lê antes de integrar.
   app.get('/docs', (_req, res) => {
     res.type('html').send(DOCS_PAGE_HTML);
+  });
+
+  /**
+   * Raiz: as três portas.
+   *
+   * Sem isto o domínio puro respondia 404 — o caso mais comum quando alguém
+   * recebe o link por mensagem e abre sem o caminho.
+   */
+  app.get('/', (_req, res) => {
+    res.type('html').send(HOME_PAGE_HTML);
   });
 
   // Portal da loja: faturamento e saque. Separado do painel do operador.

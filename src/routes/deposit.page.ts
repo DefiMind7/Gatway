@@ -98,6 +98,11 @@ export const DEPOSIT_PAGE_HTML = String.raw`<!doctype html>
   .hist td{padding:6px 4px;border-bottom:1px solid var(--line)}
   .hist td:last-child{text-align:right}
   footer{color:var(--dim);font-size:11px;text-align:center;margin-top:22px;line-height:1.6}
+  /* Convite discreto: quem está pagando não pode ser distraído do que veio
+     fazer, mas o dono de loja que usa o checkout é justamente quem vale
+     convidar. */
+  a.convite{display:inline-block;color:var(--acc);font-size:12px;text-decoration:none;
+            border:1px solid var(--line);border-radius:8px;padding:8px 14px;margin-top:4px}
 </style>
 </head>
 <body>
@@ -320,6 +325,8 @@ export const DEPOSIT_PAGE_HTML = String.raw`<!doctype html>
   <footer>
     O valor em SOL é definido pela cotação no momento da entrega.<br>
     Guarde a sua referência: <span class="mono" id="footRef"></span>
+    <br><br>
+    <a href="/parceiros" class="convite">Tem uma loja? Faça vendas conosco &rarr;</a>
   </footer>
 </main>
 
