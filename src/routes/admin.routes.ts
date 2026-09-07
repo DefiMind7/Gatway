@@ -27,6 +27,7 @@ import {
 import {
   approveWithdrawal as approveMerchantWithdrawal,
   listWithdrawals as listMerchantWithdrawals,
+  markFiatSent,
   rejectWithdrawal as rejectMerchantWithdrawal,
   syncWithdrawals,
 } from '../services/merchant-ledger.service';
@@ -640,6 +641,21 @@ router.post('/api/withdrawals/:id/approve', ah(async (req: Request, res: Respons
   const r = await approveMerchantWithdrawal(String(req.params.id ?? ''), body.note);
   log.warn({ orderId: r.orderId }, 'saque de loja aprovado pelo admin');
   res.json(r);
+}));
+
+/**
+ * Registra a transferência de um saque em fiat.
+ *
+ * Quem transfere é uma pessoa, no banco — não há automação a fazer. O que o
+ * sistema garante é o registro do valor que de fato saiu.
+ */
+router.post('/api/withdrawals/:id/sent', ah(async (req: Request, res: Response) => {
+  const body = (req.body ?? {}) as { sentAmount?: number; note?: string };
+  await markFiatSent(String(req.params.id ?? ''), {
+    sentAmount: body.sentAmount,
+    note: body.note,
+  });
+  res.json({ ok: true });
 }));
 
 /** Recusa e devolve o valor ao saldo da loja. */

@@ -9,6 +9,7 @@ import {
   getBalance,
   getLedger,
   listWithdrawals,
+  MOEDAS_SAQUE,
   requestWithdrawal,
   verifyMerchantPassword,
 } from '../services/merchant-ledger.service';
@@ -139,6 +140,10 @@ router.get('/api/dashboard', ah(async (req: Request, res: Response) => {
       name: loja.name,
       email: loja.email,
       payoutWallet: loja.payoutWallet,
+      preferredPayout: loja.preferredPayout,
+      payoutCurrency: loja.payoutCurrency,
+      payoutFiatDetails: loja.payoutFiatDetails,
+      currencies: MOEDAS_SAQUE,
       commissionBps: loja.commissionBps,
       apiKeyPrefix: loja.apiKeyPrefix,
       callbackUrl: loja.callbackUrl,
@@ -149,6 +154,10 @@ router.get('/api/dashboard', ah(async (req: Request, res: Response) => {
       id: s.id,
       amount: s.amountFiat,
       status: s.status,
+      method: s.payoutMethod,
+      payoutCurrency: s.payoutCurrency,
+      estimated: s.estimatedAmount,
+      sent: s.sentAmount,
       wallet: s.destinationWallet,
       solSent: s.solSent,
       signature: s.signature,
@@ -166,21 +175,68 @@ router.get('/api/dashboard', ah(async (req: Request, res: Response) => {
   });
 }));
 
-/** A loja define onde quer receber os saques. */
-router.post('/api/wallet', ah(async (req: Request, res: Response) => {
+/**
+ * Como a loja quer receber.
+ *
+ * Cripto e fiat convivem: a loja guarda os dois destinos e escolhe a cada
+ * saque. Forçar uma escolha única obrigaria a reconfigurar a conta toda vez
+ * que ela quisesse mudar.
+ */
+router.post('/api/payout-settings', ah(async (req: Request, res: Response) => {
   const loja = await exigirLoja(req);
-  const body = (req.body ?? {}) as { wallet?: string };
-  const carteira = String(body.wallet ?? '').trim();
+  const body = (req.body ?? {}) as {
+    wallet?: string;
+    preferred?: string;
+    currency?: string;
+    fiatDetails?: string;
+  };
 
-  try {
-    new PublicKey(carteira);
-  } catch {
-    throw new GatewayError(`carteira Solana inválida: "${carteira}"`, 'INVALID_WALLET', false);
+  const dados: Record<string, string> = {};
+
+  if (body.wallet !== undefined && body.wallet.trim() !== '') {
+    const carteira = body.wallet.trim();
+    try {
+      new PublicKey(carteira);
+    } catch {
+      throw new GatewayError(`carteira Solana inválida: "${carteira}"`, 'INVALID_WALLET', false);
+    }
+    dados.payoutWallet = carteira;
   }
 
-  await prisma.merchant.update({ where: { id: loja.id }, data: { payoutWallet: carteira } });
-  log.info({ merchantId: loja.id }, 'loja atualizou a carteira de saque');
-  res.json({ ok: true, wallet: carteira });
+  if (body.preferred !== undefined) {
+    const p = body.preferred.toUpperCase();
+    if (p !== 'SOL' && p !== 'FIAT') {
+      throw new GatewayError('forma de recebimento inválida', 'INVALID_BODY', false);
+    }
+    dados.preferredPayout = p;
+  }
+
+  if (body.currency !== undefined) {
+    const c = body.currency.toUpperCase();
+    if (!MOEDAS_SAQUE.includes(c as never)) {
+      throw new GatewayError(
+        `moeda não aceita: ${c}. Use ${MOEDAS_SAQUE.join(', ')}`,
+        'INVALID_CURRENCY',
+        false,
+      );
+    }
+    dados.payoutCurrency = c;
+  }
+
+  if (body.fiatDetails !== undefined) {
+    dados.payoutFiatDetails = body.fiatDetails.trim().slice(0, 500);
+  }
+
+  const atualizada = await prisma.merchant.update({ where: { id: loja.id }, data: dados });
+  log.info({ merchantId: loja.id }, 'loja atualizou as preferências de recebimento');
+
+  res.json({
+    ok: true,
+    payoutWallet: atualizada.payoutWallet,
+    preferredPayout: atualizada.preferredPayout,
+    payoutCurrency: atualizada.payoutCurrency,
+    payoutFiatDetails: atualizada.payoutFiatDetails,
+  });
 }));
 
 /**
@@ -191,12 +247,21 @@ router.post('/api/wallet', ah(async (req: Request, res: Response) => {
  */
 router.post('/api/withdrawals', ah(async (req: Request, res: Response) => {
   const loja = await exigirLoja(req);
-  const body = (req.body ?? {}) as { amount?: number; wallet?: string };
+  const body = (req.body ?? {}) as {
+    amount?: number;
+    method?: string;
+    wallet?: string;
+    currency?: string;
+    fiatDetails?: string;
+  };
 
   const resultado = await requestWithdrawal({
     merchant: loja,
     amountFiat: Number(body.amount),
+    payoutMethod: body.method,
     destinationWallet: body.wallet,
+    payoutCurrency: body.currency,
+    payoutDetails: body.fiatDetails,
     clientIp: req.ip,
   });
 

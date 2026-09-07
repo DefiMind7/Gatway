@@ -183,28 +183,107 @@ export async function getLedger(merchantId: string, limit = 50): Promise<LedgerL
 /** Piso do saque: abaixo disso a taxa de rede come uma fração absurda. */
 const MIN_SAQUE = new Prisma.Decimal(10);
 
-export async function requestWithdrawal(input: {
-  merchant: Merchant;
-  amountFiat: number;
-  destinationWallet?: string | undefined;
-  clientIp?: string | undefined;
-}): Promise<{ id: string; amountFiat: string; destinationWallet: string }> {
-  const carteira = (input.destinationWallet ?? input.merchant.payoutWallet ?? '').trim();
+export const PayoutMethod = { SOL: 'SOL', FIAT: 'FIAT' } as const;
+export const MOEDAS_SAQUE = ['BRL', 'USD', 'EUR'] as const;
 
-  if (!carteira) {
+/**
+ * Converte entre a moeda do saldo e a moeda de saída.
+ *
+ * Usa o câmbio do OPERADOR (`depositRatesJson`), que é quantos USDC valem uma
+ * unidade de cada moeda. Passar por USDC como pivô mantém uma única tabela de
+ * câmbio no sistema — inventar uma segunda seria criar duas verdades sobre o
+ * mesmo número.
+ *
+ * O resultado é estimativa: quem paga em fiat é o operador, pelo câmbio do
+ * banco dele no dia. Por isso o valor efetivamente enviado é registrado à
+ * parte, e é ele que vale.
+ */
+export async function convertFiat(
+  amount: Prisma.Decimal,
+  from: string,
+  to: string,
+): Promise<Prisma.Decimal> {
+  if (from === to) return amount;
+
+  const rates = await getDepositRates();
+  const origem = rates[from];
+  const destino = rates[to];
+
+  if (!origem || !destino) {
     throw new GatewayError(
-      'defina a carteira Solana que vai receber o saque',
-      'MISSING_PAYOUT_WALLET',
+      `sem câmbio configurado para ${from}→${to} — defina em Câmbio do operador`,
+      'MISSING_RATE',
       false,
     );
   }
-  try {
-    new PublicKey(carteira);
-  } catch {
-    throw new GatewayError(`carteira Solana inválida: "${carteira}"`, 'INVALID_WALLET', false);
-  }
-  if (carteira === config.solana.vaultPublicKey.toBase58()) {
-    throw new GatewayError('essa é a carteira do gateway', 'DESTINATION_IS_VAULT', false);
+
+  // amount(from) → USDC → to
+  return amount.mul(origem).div(destino).toDecimalPlaces(2);
+}
+
+export async function requestWithdrawal(input: {
+  merchant: Merchant;
+  amountFiat: number;
+  /** `SOL` entrega on-chain; `FIAT` é transferência feita pelo operador. */
+  payoutMethod?: string | undefined;
+  destinationWallet?: string | undefined;
+  payoutCurrency?: string | undefined;
+  payoutDetails?: string | undefined;
+  clientIp?: string | undefined;
+}): Promise<{
+  id: string;
+  amountFiat: string;
+  payoutMethod: string;
+  destination: string;
+  estimated: string | null;
+  payoutCurrency: string;
+}> {
+  const metodo =
+    String(input.payoutMethod ?? input.merchant.preferredPayout ?? PayoutMethod.SOL).toUpperCase() ===
+    PayoutMethod.FIAT
+      ? PayoutMethod.FIAT
+      : PayoutMethod.SOL;
+
+  let carteira = '';
+  let dadosFiat = '';
+  let moedaSaida = 'BRL';
+
+  if (metodo === PayoutMethod.SOL) {
+    carteira = (input.destinationWallet ?? input.merchant.payoutWallet ?? '').trim();
+
+    if (!carteira) {
+      throw new GatewayError(
+        'defina a carteira Solana que vai receber o saque',
+        'MISSING_PAYOUT_WALLET',
+        false,
+      );
+    }
+    try {
+      new PublicKey(carteira);
+    } catch {
+      throw new GatewayError(`carteira Solana inválida: "${carteira}"`, 'INVALID_WALLET', false);
+    }
+    if (carteira === config.solana.vaultPublicKey.toBase58()) {
+      throw new GatewayError('essa é a carteira do gateway', 'DESTINATION_IS_VAULT', false);
+    }
+  } else {
+    dadosFiat = (input.payoutDetails ?? input.merchant.payoutFiatDetails ?? '').trim();
+    moedaSaida = String(input.payoutCurrency ?? input.merchant.payoutCurrency ?? 'BRL').toUpperCase();
+
+    if (!dadosFiat) {
+      throw new GatewayError(
+        'informe a conta que vai receber: chave Pix, IBAN ou dados bancários',
+        'MISSING_PAYOUT_DETAILS',
+        false,
+      );
+    }
+    if (!MOEDAS_SAQUE.includes(moedaSaida as never)) {
+      throw new GatewayError(
+        `moeda não aceita: ${moedaSaida}. Use ${MOEDAS_SAQUE.join(', ')}`,
+        'INVALID_CURRENCY',
+        false,
+      );
+    }
   }
 
   const valor = new Prisma.Decimal(Number(input.amountFiat).toFixed(2));
@@ -226,6 +305,11 @@ export async function requestWithdrawal(input: {
     );
   }
 
+  // Estimativa na moeda de saída. Só informativa: quem transfere é o operador,
+  // pelo câmbio do banco dele.
+  const estimado =
+    metodo === PayoutMethod.FIAT ? await convertFiat(valor, 'BRL', moedaSaida) : null;
+
   /**
    * O débito acontece AGORA, junto do pedido, numa transação.
    *
@@ -239,7 +323,11 @@ export async function requestWithdrawal(input: {
         merchantId: input.merchant.id,
         amountFiat: valor,
         currency: 'BRL',
+        payoutMethod: metodo,
         destinationWallet: carteira,
+        payoutDetails: dadosFiat || null,
+        payoutCurrency: moedaSaida,
+        estimatedAmount: estimado,
         status: WithdrawalStatus.PENDENTE,
         ...(input.clientIp !== undefined ? { clientIp: input.clientIp } : {}),
       },
@@ -252,7 +340,10 @@ export async function requestWithdrawal(input: {
         amount: valor.negated(),
         currency: 'BRL',
         withdrawalId: criado.id,
-        description: `Saque solicitado para ${carteira.slice(0, 4)}…${carteira.slice(-4)}`,
+        description:
+          metodo === PayoutMethod.SOL
+            ? `Saque em SOL para ${carteira.slice(0, 4)}…${carteira.slice(-4)}`
+            : `Saque em ${moedaSaida} (transferência)`,
       },
     });
 
@@ -260,15 +351,69 @@ export async function requestWithdrawal(input: {
   });
 
   log.warn(
-    { merchantId: input.merchant.id, saqueId: saque.id, valor: valor.toString(), carteira },
+    {
+      merchantId: input.merchant.id,
+      saqueId: saque.id,
+      valor: valor.toString(),
+      metodo,
+      destino: metodo === PayoutMethod.SOL ? carteira : moedaSaida,
+    },
     'loja pediu saque',
   );
 
   return {
     id: saque.id,
     amountFiat: valor.toFixed(2),
-    destinationWallet: carteira,
+    payoutMethod: metodo,
+    destination: metodo === PayoutMethod.SOL ? carteira : dadosFiat,
+    estimated: estimado?.toFixed(2) ?? null,
+    payoutCurrency: moedaSaida,
   };
+}
+
+/**
+ * Registra que o operador transferiu um saque em fiat.
+ *
+ * Não há automação possível aqui: quem faz a transferência é uma pessoa, no
+ * banco. O que o sistema garante é o registro — quanto saiu, em que moeda, e
+ * com qual comprovante — para o saldo e o histórico da loja baterem.
+ */
+export async function markFiatSent(
+  id: string,
+  input: { sentAmount?: number | undefined; note?: string | undefined },
+): Promise<void> {
+  const saque = await prisma.merchantWithdrawal.findUnique({ where: { id } });
+  if (!saque) throw new GatewayError('saque não encontrado', 'NOT_FOUND', false);
+
+  if (saque.payoutMethod !== PayoutMethod.FIAT) {
+    throw new GatewayError(
+      'este saque é em cripto — aprove para a pipeline enviar',
+      'NOT_FIAT',
+      false,
+    );
+  }
+  if (saque.status === WithdrawalStatus.ENVIADO) {
+    throw new GatewayError('este saque já foi marcado como enviado', 'ALREADY_SENT', false);
+  }
+  if (saque.status === WithdrawalStatus.RECUSADO) {
+    throw new GatewayError('este saque foi recusado', 'INVALID_STATUS', false);
+  }
+
+  await prisma.merchantWithdrawal.update({
+    where: { id },
+    data: {
+      status: WithdrawalStatus.ENVIADO,
+      sentAmount:
+        input.sentAmount !== undefined
+          ? new Prisma.Decimal(Number(input.sentAmount).toFixed(2))
+          : saque.estimatedAmount,
+      reviewNote: input.note?.trim() || saque.reviewNote,
+      reviewedAt: saque.reviewedAt ?? new Date(),
+      completedAt: new Date(),
+    },
+  });
+
+  log.warn({ saqueId: id, moeda: saque.payoutCurrency }, 'saque em fiat marcado como enviado');
 }
 
 export interface WithdrawalLine {
@@ -277,6 +422,11 @@ export interface WithdrawalLine {
   merchantName: string;
   amountFiat: string;
   currency: string;
+  payoutMethod: string;
+  payoutCurrency: string;
+  payoutDetails: string | null;
+  estimatedAmount: string | null;
+  sentAmount: string | null;
   destinationWallet: string;
   status: string;
   orderId: string | null;
@@ -308,6 +458,11 @@ export async function listWithdrawals(options: {
     merchantName: s.merchant.name,
     amountFiat: s.amountFiat.toFixed(2),
     currency: s.currency,
+    payoutMethod: s.payoutMethod,
+    payoutCurrency: s.payoutCurrency,
+    payoutDetails: s.payoutDetails,
+    estimatedAmount: s.estimatedAmount?.toFixed(2) ?? null,
+    sentAmount: s.sentAmount?.toFixed(2) ?? null,
     destinationWallet: s.destinationWallet,
     status: s.status,
     orderId: s.orderId,
@@ -339,6 +494,13 @@ export async function approveWithdrawal(
     throw new GatewayError(
       `só saques pendentes podem ser aprovados (este está ${saque.status})`,
       'INVALID_STATUS',
+      false,
+    );
+  }
+  if (saque.payoutMethod === PayoutMethod.FIAT) {
+    throw new GatewayError(
+      'este saque é em fiat: faça a transferência e use "marcar como enviado"',
+      'IS_FIAT',
       false,
     );
   }
@@ -411,7 +573,11 @@ export async function approveWithdrawal(
  */
 export async function syncWithdrawals(): Promise<{ concluidos: number }> {
   const emVoo = await prisma.merchantWithdrawal.findMany({
-    where: { status: WithdrawalStatus.APROVADO, orderId: { not: null } },
+    where: {
+      status: WithdrawalStatus.APROVADO,
+      payoutMethod: PayoutMethod.SOL,
+      orderId: { not: null },
+    },
     take: 50,
   });
   if (emVoo.length === 0) return { concluidos: 0 };

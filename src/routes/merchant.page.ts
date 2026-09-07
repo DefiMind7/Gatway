@@ -97,21 +97,49 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
     </section>
 
     <section>
-      <h2>Sacar em SOL</h2>
-      <label for="wallet">Sua carteira Solana</label>
-      <input id="wallet" class="mono" placeholder="Cole o endereço que vai receber" spellcheck="false">
-      <button class="ghost" id="salvarCarteira" style="margin-top:8px">Salvar carteira</button>
+      <h2>Sacar</h2>
+
+      <label for="metodo">Como você quer receber</label>
+      <select id="metodo">
+        <option value="SOL">Cripto — SOL na sua carteira</option>
+        <option value="FIAT">Dinheiro — transferência bancária</option>
+      </select>
+
+      <!-- ── cripto ── -->
+      <div id="blocoSol">
+        <label for="wallet">Sua carteira Solana</label>
+        <input id="wallet" class="mono" placeholder="Cole o endereço que vai receber" spellcheck="false">
+      </div>
+
+      <!-- ── fiat ── -->
+      <div id="blocoFiat" class="hide">
+        <label for="moeda">Moeda</label>
+        <select id="moeda">
+          <option value="BRL">Real (BRL)</option>
+          <option value="USD">Dólar (USD)</option>
+          <option value="EUR">Euro (EUR)</option>
+        </select>
+
+        <label for="dadosFiat">Conta que vai receber</label>
+        <input id="dadosFiat" placeholder="Chave Pix, IBAN ou dados bancários">
+        <p class="dim" style="font-size:11px;margin:5px 0 0">
+          Em BRL, a chave Pix basta. Em dólar ou euro, informe IBAN/SWIFT e o titular.
+        </p>
+      </div>
+
+      <button class="ghost" id="salvarPreferencias" style="margin-top:10px">Salvar como padrão</button>
 
       <label for="valor" style="margin-top:18px">Quanto sacar (BRL)</label>
       <input id="valor" type="number" step="0.01" min="10" placeholder="0,00">
       <p class="dim" style="font-size:12px;margin:6px 0 0" id="ajudaSaque">—</p>
+      <p class="dim" style="font-size:12px;margin:4px 0 0" id="estimativa"></p>
       <button id="pedirSaque">Pedir saque</button>
     </section>
 
     <section>
       <h2>Saques</h2>
       <div class="scroll"><table id="tabelaSaques"><thead><tr>
-        <th>Quando</th><th>Valor</th><th>Estado</th><th>Comprovante</th>
+        <th>Quando</th><th>Valor</th><th>Forma</th><th>Estado</th><th>Comprovante</th>
       </tr></thead><tbody></tbody></table></div>
     </section>
 
@@ -205,20 +233,40 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
       '% sobre cada venda. Já retido: ' + brl(b.totalCommission) + '.';
 
     if (dados.merchant.payoutWallet) $('wallet').value = dados.merchant.payoutWallet;
+    if (dados.merchant.payoutFiatDetails) $('dadosFiat').value = dados.merchant.payoutFiatDetails;
+    if (dados.merchant.payoutCurrency) $('moeda').value = dados.merchant.payoutCurrency;
+    if (dados.merchant.preferredPayout) $('metodo').value = dados.merchant.preferredPayout;
+    trocarMetodo();
     $('chave').textContent = dados.merchant.apiKeyPrefix + '…';
     $('ajudaSaque').textContent =
       'Disponível: ' + brl(b.available) + '. Mínimo de R$ 10,00. ' +
       'O valor sai do saldo assim que você pede, e é convertido em SOL pela cotação do momento do envio.';
 
     document.querySelector('#tabelaSaques tbody').innerHTML = (dados.withdrawals || []).map(function (s) {
-      var comprovante = s.signature
-        ? '<a class="mono" target="_blank" rel="noopener" href="https://solscan.io/tx/' +
-          esc(s.signature) + '">ver na blockchain</a>' +
-          (s.solSent ? '<br><span class="dim" style="font-size:11px">' + esc(s.solSent) + ' SOL</span>' : '')
-        : (s.note ? '<span class="dim">' + esc(s.note) + '</span>' : '<span class="dim">—</span>');
+      var cripto = s.method !== 'FIAT';
+
+      var comprovante;
+      if (cripto) {
+        comprovante = s.signature
+          ? '<a class="mono" target="_blank" rel="noopener" href="https://solscan.io/tx/' +
+            esc(s.signature) + '">ver na blockchain</a>' +
+            (s.solSent ? '<br><span class="dim" style="font-size:11px">' + esc(s.solSent) + ' SOL</span>' : '')
+          : (s.note ? '<span class="dim">' + esc(s.note) + '</span>' : '<span class="dim">—</span>');
+      } else {
+        comprovante = s.sent
+          ? '<span class="ok">' + esc(s.sent) + ' ' + esc(s.payoutCurrency) + ' transferidos</span>'
+          : (s.note ? '<span class="dim">' + esc(s.note) + '</span>' : '<span class="dim">—</span>');
+      }
+
+      var forma = cripto
+        ? '<span class="dim">SOL</span>'
+        : '<span class="dim">' + esc(s.payoutCurrency) +
+          (s.estimated && !s.sent ? ' · ~' + esc(s.estimated) : '') + '</span>';
+
       return '<tr>' +
         '<td data-l="Quando" class="dim">' + new Date(s.createdAt).toLocaleString() + '</td>' +
         '<td data-l="Valor" class="num">' + brl(s.amount) + '</td>' +
+        '<td data-l="Forma">' + forma + '</td>' +
         '<td data-l="Estado">' + (ESTADO_SAQUE[s.status] || esc(s.status)) + '</td>' +
         '<td data-l="Comprovante">' + comprovante + '</td></tr>';
     }).join('') || '<tr><td class="dim">nenhum saque ainda</td></tr>';
@@ -272,13 +320,49 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
     });
   });
 
-  $('salvarCarteira').addEventListener('click', function () {
+  function trocarMetodo() {
+    var fiat = $('metodo').value === 'FIAT';
+    $('blocoSol').className = fiat ? 'hide' : '';
+    $('blocoFiat').className = fiat ? '' : 'hide';
+    atualizarEstimativa();
+  }
+
+  /**
+   * Mostra quanto sai na moeda escolhida.
+   *
+   * É estimativa e a tela diz isso: quem transfere é o operador, pelo câmbio
+   * do banco dele no dia. Apresentar como valor fechado criaria uma promessa
+   * que a transferência real pode desmentir.
+   */
+  function atualizarEstimativa() {
+    var el = $('estimativa');
+    var valor = Number($('valor').value);
+    if ($('metodo').value !== 'FIAT' || !(valor > 0)) { el.textContent = ''; return; }
+
+    var moeda = $('moeda').value;
+    if (moeda === 'BRL') {
+      el.textContent = 'Você recebe ' + brl(valor) + ' na conta informada.';
+    } else {
+      el.textContent = 'O valor em ' + moeda + ' é calculado no câmbio do dia da transferência.';
+    }
+  }
+
+  $('metodo').addEventListener('change', trocarMetodo);
+  $('moeda').addEventListener('change', atualizarEstimativa);
+  $('valor').addEventListener('input', atualizarEstimativa);
+
+  $('salvarPreferencias').addEventListener('click', function () {
     alerta('');
-    api('/api/wallet', {
+    api('/api/payout-settings', {
       method: 'POST',
-      body: JSON.stringify({ wallet: $('wallet').value.trim() })
+      body: JSON.stringify({
+        wallet: $('wallet').value.trim(),
+        preferred: $('metodo').value,
+        currency: $('moeda').value,
+        fiatDetails: $('dadosFiat').value.trim()
+      })
     }).then(function () {
-      alerta('Carteira salva.', 'o');
+      alerta('Preferências salvas.', 'o');
       carregar();
     }).catch(function (err) { alerta(err.message); });
   });
@@ -286,17 +370,28 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
   $('pedirSaque').addEventListener('click', function () {
     alerta('');
     var valor = Number($('valor').value);
+    var fiat = $('metodo').value === 'FIAT';
     var carteira = $('wallet').value.trim();
-    if (!carteira) { alerta('Informe a carteira que vai receber.'); return; }
-    if (!(valor > 0)) { alerta('Informe o valor do saque.'); return; }
+    var dadosFiat = $('dadosFiat').value.trim();
 
-    if (!confirm('Pedir saque de ' + brl(valor) + ' para:\n\n' + carteira +
+    if (!(valor > 0)) { alerta('Informe o valor do saque.'); return; }
+    if (!fiat && !carteira) { alerta('Informe a carteira que vai receber.'); return; }
+    if (fiat && !dadosFiat) { alerta('Informe a conta que vai receber.'); return; }
+
+    var destino = fiat ? dadosFiat + ' (' + $('moeda').value + ')' : carteira;
+    if (!confirm('Pedir saque de ' + brl(valor) + ' para:\n\n' + destino +
                  '\n\nO valor sai do seu saldo agora e o envio acontece após a análise.')) return;
 
     $('pedirSaque').disabled = true;
     api('/api/withdrawals', {
       method: 'POST',
-      body: JSON.stringify({ amount: valor, wallet: carteira })
+      body: JSON.stringify({
+        amount: valor,
+        method: $('metodo').value,
+        wallet: carteira,
+        currency: $('moeda').value,
+        fiatDetails: dadosFiat
+      })
     }).then(function () {
       alerta('Saque solicitado. Você acompanha o estado na tabela abaixo.', 'o');
       $('valor').value = '';

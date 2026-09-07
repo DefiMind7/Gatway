@@ -290,7 +290,7 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
     <h2>Saques das lojas — dinheiro para enviar</h2>
     <div id="wdOut" class="dim" style="font-size:13px;margin-bottom:10px">—</div>
     <div class="scroll"><table id="wdTable"><thead><tr>
-      <th>Quando</th><th>Loja</th><th>Valor</th><th>Carteira</th><th>Estado</th><th>Comprovante</th><th></th>
+      <th>Quando</th><th>Loja</th><th>Valor</th><th>Forma</th><th>Destino</th><th>Estado</th><th>Comprovante</th><th></th>
     </tr></thead><tbody></tbody></table></div>
     <p class="dim" style="font-size:12px;margin-bottom:0">
       Aprovar cria a ordem que converte o valor em SOL e envia — consome float de USDC do vault,
@@ -951,27 +951,46 @@ async function loadWithdrawals() {
       fmt(total, 2) + ' BRL</b>';
 
   document.querySelector('#wdTable tbody').innerHTML = lista.map((w) => {
+    const fiat = w.payoutMethod === 'FIAT';
+
+    // Em cripto o gateway envia; em fiat quem transfere é uma pessoa, e o
+    // botão registra o que já saiu do banco.
     const acoes = w.status === 'pendente'
-      ? '<button class="mini" data-wd-ok="' + esc(w.id) + '">aprovar</button> ' +
-        '<button class="mini ghost" data-wd-no="' + esc(w.id) + '">recusar</button>'
+      ? (fiat
+          ? '<button class="mini" data-wd-sent="' + esc(w.id) + '">marcar enviado</button> ' +
+            '<button class="mini ghost" data-wd-no="' + esc(w.id) + '">recusar</button>'
+          : '<button class="mini" data-wd-ok="' + esc(w.id) + '">aprovar e enviar</button> ' +
+            '<button class="mini ghost" data-wd-no="' + esc(w.id) + '">recusar</button>')
       : (w.reviewNote ? '<span class="dim" style="font-size:11px">' + esc(w.reviewNote.slice(0, 40)) + '</span>' : '');
 
-    const comprovante = w.signature
-      ? '<a class="mono" style="font-size:11px" target="_blank" rel="noopener" href="https://solscan.io/tx/' +
-        esc(w.signature) + '">' + esc(w.solSent || '') + ' SOL</a>'
-      : '<span class="dim">—</span>';
+    let comprovante = '<span class="dim">—</span>';
+    if (w.signature) {
+      comprovante = '<a class="mono" style="font-size:11px" target="_blank" rel="noopener" href="https://solscan.io/tx/' +
+        esc(w.signature) + '">' + esc(w.solSent || '') + ' SOL</a>';
+    } else if (w.sentAmount) {
+      comprovante = '<span class="ok">' + esc(w.sentAmount) + ' ' + esc(w.payoutCurrency) + '</span>';
+    }
+
+    const forma = fiat
+      ? '<span class="warn">' + esc(w.payoutCurrency) + '</span>' +
+        (w.estimatedAmount ? '<br><span class="dim" style="font-size:11px">~' + esc(w.estimatedAmount) + '</span>' : '')
+      : '<span class="dim">SOL</span>';
+
+    const destino = fiat
+      ? '<span class="mono" style="font-size:11px;white-space:normal">' + esc(w.payoutDetails || '—') + '</span>'
+      : '<a class="mono" target="_blank" rel="noopener" href="https://solscan.io/account/' +
+        encodeURIComponent(w.destinationWallet) + '">' + esc(short(w.destinationWallet)) + '</a>';
 
     return '<tr>' +
       '<td data-l="Quando" class="mono dim">' + new Date(w.createdAt).toLocaleString() + '</td>' +
       '<td data-l="Loja"><b>' + esc(w.merchantName) + '</b></td>' +
       '<td data-l="Valor" class="mono warn">' + esc(w.amountFiat) + ' ' + esc(w.currency) + '</td>' +
-      '<td data-l="Carteira" class="mono" title="' + esc(w.destinationWallet) + '">' +
-        '<a target="_blank" rel="noopener" href="https://solscan.io/account/' +
-        encodeURIComponent(w.destinationWallet) + '">' + esc(short(w.destinationWallet)) + '</a></td>' +
+      '<td data-l="Forma">' + forma + '</td>' +
+      '<td data-l="Destino">' + destino + '</td>' +
       '<td data-l="Estado">' + (WD_ESTADO[w.status] || esc(w.status)) + '</td>' +
       '<td data-l="Comprovante">' + comprovante + '</td>' +
       '<td data-l="" class="del">' + acoes + '</td></tr>';
-  }).join('') || '<tr><td colspan="7" class="dim">nenhum saque ainda</td></tr>';
+  }).join('') || '<tr><td colspan="8" class="dim">nenhum saque ainda</td></tr>';
 }
 
 document.addEventListener('click', async (ev) => {
@@ -997,6 +1016,34 @@ document.addEventListener('click', async (ev) => {
       });
       alert('Ordem criada. Consome ' + r.usdcNeeded + ' USDC do float.\n\n' +
             'Acompanhe na aba Operação; o saque fecha sozinho quando o SOL sair.');
+      loadAll();
+    } catch (err) { alert('Erro: ' + err.message); t.disabled = false; }
+    return;
+  }
+
+  const sentId = t.getAttribute('data-wd-sent');
+  if (sentId) {
+    const dados = await ask({
+      title: 'Registrar transferência',
+      message: 'Faça a transferência no banco e registre aqui o valor que <b>de fato</b> saiu. ' +
+        'A estimativa do sistema usa o seu câmbio configurado; o banco pode divergir.',
+      okLabel: 'Registrar como enviado',
+      fields: [
+        { name: 'sentAmount', label: 'Valor transferido (na moeda do saque)', placeholder: '0.00' },
+        { name: 'note', label: 'Comprovante ou observação', placeholder: 'id da transferência' },
+      ],
+    });
+    if (dados === null) return;
+
+    t.disabled = true;
+    try {
+      await api('/withdrawals/' + encodeURIComponent(sentId) + '/sent', {
+        method: 'POST',
+        body: JSON.stringify({
+          sentAmount: dados.sentAmount ? Number(dados.sentAmount) : undefined,
+          note: dados.note,
+        }),
+      });
       loadAll();
     } catch (err) { alert('Erro: ' + err.message); t.disabled = false; }
     return;

@@ -372,8 +372,14 @@ model Merchant {
   // ── Portal da loja ──
   /// scrypt. Definida na aprovação e entregue junto com a chave de API.
   passwordHash String?
-  /// Carteira Solana onde a loja recebe os saques. Ela mesma configura.
+  /// Carteira Solana onde a loja recebe os saques em cripto.
   payoutWallet String?
+  /// Como a loja prefere receber: `SOL` ou `FIAT`.
+  preferredPayout String @default("SOL")
+  /// Moeda do saque em fiat: BRL, USD ou EUR.
+  payoutCurrency  String @default("BRL")
+  /// Chave Pix, IBAN, dados da conta — texto livre, é o operador quem lê.
+  payoutFiatDetails String?
 
   /// Nossa comissão sobre cada venda dela, em bps. 3000 = 30%.
   /// Snapshot por venda fica no lançamento, não aqui — mudar a comissão não
@@ -499,9 +505,24 @@ model MerchantWithdrawal {
   amountFiat Decimal
   currency   String  @default("BRL")
 
-  /// Carteira Solana de destino, copiada no momento do pedido — trocar a
-  /// carteira do cadastro depois não pode redirecionar um saque já pedido.
+  /// Como sai: `SOL` (on-chain, automático) ou `FIAT` (transferência manual).
+  payoutMethod String @default("SOL")
+
+  /// Destino em cripto. Vazio nos saques em fiat.
+  ///
+  /// Copiado no momento do pedido — trocar a carteira do cadastro depois não
+  /// pode redirecionar um saque já pedido. Vale igual para os dados bancários.
   destinationWallet String
+
+  /// Destino em fiat: chave Pix, IBAN, dados da conta.
+  payoutDetails  String?
+  /// Moeda do saque em fiat.
+  payoutCurrency String @default("BRL")
+  /// Estimativa na moeda de saída, pelo câmbio do operador no pedido.
+  estimatedAmount Decimal?
+  /// Quanto o operador de fato transferiu. Pode divergir da estimativa —
+  /// câmbio do banco, taxa de remessa — e é este o número que vale.
+  sentAmount Decimal?
 
   /// `pendente` | `aprovado` | `enviado` | `recusado`
   status String @default("pendente")
