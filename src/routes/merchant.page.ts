@@ -111,11 +111,28 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
 
   <div id="alert" class="banner e hide"></div>
 
+  <!-- ═══════════ Pessoa logada, sem loja ainda ═══════════ -->
+  <div id="abrir" class="hide">
+    <section>
+      <h2>Abrir a minha loja</h2>
+      <p class="dim" style="font-size:13px;margin:0 0 4px">
+        Você já tem conta. Dê um nome à loja e ela nasce ligada a ela — sem senha
+        separada, sem segundo cadastro. Cobrar de verdade depende da análise, que
+        você pede logo depois.
+      </p>
+      <label for="aNome">Nome da sua loja</label>
+      <input id="aNome" placeholder="Como a sua loja é conhecida" maxlength="120">
+      <button id="abrirLoja">Abrir loja</button>
+      <p class="dim" style="font-size:12px;margin:14px 0 0">
+        <a href="/inicio">Voltar ao início</a>
+      </p>
+    </section>
+  </div>
+
   <!-- ═══════════ Entrada ═══════════ -->
   <div id="porta">
     <div class="abas">
       <button class="on" data-porta="entrar">Entrar</button>
-      <button data-porta="criar">Criar conta</button>
       <button data-porta="esqueci">Esqueci a senha</button>
     </div>
 
@@ -126,23 +143,11 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
       <label for="password">Senha</label>
       <input id="password" type="password" autocomplete="current-password">
       <button id="entrar">Entrar</button>
-    </section>
-
-    <section data-p="criar" class="hide">
-      <h2>Criar conta</h2>
-      <p class="dim" style="font-size:13px;margin:0 0 4px">
-        A conta é grátis e imediata. Cobrar de verdade depende da análise, que você
-        pede aqui dentro logo depois.
+      <p class="dim" style="font-size:12px;margin:16px 0 0">
+        Esta entrada é para lojas com senha própria. Se você nunca se cadastrou,
+        a conta nasce em <a href="/conta?novo=1">criar conta</a> — a mesma que serve
+        para comprar cripto.
       </p>
-      <label for="cEmpresa">Nome da sua loja</label>
-      <input id="cEmpresa" placeholder="Como a sua loja é conhecida" maxlength="120">
-      <label for="cEmail">E-mail</label>
-      <input id="cEmail" type="email" autocomplete="username" placeholder="contato@sualoja.com">
-      <label for="cSenha">Senha</label>
-      <input id="cSenha" type="password" autocomplete="new-password" placeholder="mínimo de 10 caracteres">
-      <label for="cSenha2">Repita a senha</label>
-      <input id="cSenha2" type="password" autocomplete="new-password">
-      <button id="criar">Criar conta</button>
     </section>
 
     <section data-p="esqueci" class="hide">
@@ -401,7 +406,7 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
         <button class="ghost" id="salvarPerfil">Salvar dados</button>
       </section>
 
-      <section>
+      <section id="blocoSenha">
         <h2>Senha</h2>
         <label for="sAtual">Senha atual</label>
         <input id="sAtual" type="password" autocomplete="current-password">
@@ -415,12 +420,21 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
         <button id="trocarSenha">Trocar senha</button>
       </section>
 
-      <section>
+      <section id="blocoSessoes">
         <h2>Dispositivos conectados</h2>
         <div class="scroll"><table id="tabelaSessoes"><thead><tr>
           <th>Entrou em</th><th>De onde</th><th>Vale até</th><th></th>
         </tr></thead><tbody></tbody></table></div>
         <button class="danger" id="encerrarSessoes">Encerrar as outras sessões</button>
+      </section>
+
+      <section id="contaDaPessoa" class="hide">
+        <h2>Acesso</h2>
+        <p class="dim" style="font-size:13px;margin:0">
+          Esta loja pertence à sua conta pessoal. Senha e dispositivos conectados
+          ficam lá — é a mesma credencial que abre o checkout e este painel.
+        </p>
+        <p style="font-size:13px;margin:10px 0 0"><a href="/inicio">Ir para o início</a></p>
       </section>
 
       <section>
@@ -439,9 +453,14 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
 (function () {
   var $ = function (id) { return document.getElementById(id); };
   var CHAVE_SESSAO = 'gw:merchant';
-  var sessao = null;
+  var CHAVE_PESSOA = 'gw:session';
+  var sessao = null;   // sessão da LOJA (login próprio)
+  var pessoa = null;   // sessão da PESSOA (funil de entrada)
   var dadosAtuais = null;
-  try { sessao = localStorage.getItem(CHAVE_SESSAO); } catch (e) { /* modo privado */ }
+  try {
+    sessao = localStorage.getItem(CHAVE_SESSAO);
+    pessoa = localStorage.getItem(CHAVE_PESSOA);
+  } catch (e) { /* modo privado */ }
 
   function guardar(token) {
     sessao = token;
@@ -462,10 +481,18 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
   function api(caminho, opts) {
     opts = opts || {};
     opts.headers = Object.assign({ 'Content-Type': 'application/json' }, opts.headers);
+    // Os dois cabeçalhos vão juntos; o servidor resolve qual vale. É o que
+    // permite ao mesmo painel servir a loja com login próprio e a loja que é
+    // consequência de uma conta de pessoa.
     if (sessao) opts.headers['x-merchant-session'] = sessao;
+    if (pessoa) opts.headers['x-session'] = pessoa;
     return fetch('/loja' + caminho, opts).then(function (res) {
       return res.json().then(function (body) {
-        if (!res.ok) throw new Error(body && body.message ? body.message : 'erro ' + res.status);
+        if (!res.ok) {
+          var err = new Error(body && body.message ? body.message : 'erro ' + res.status);
+          err.code = body && body.error;
+          throw err;
+        }
         return body;
       });
     });
@@ -586,6 +613,7 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
 
     $('porta').classList.add('hide');
     $('sair').classList.remove('hide');
+    $('sair').textContent = m.ownedByPerson ? 'Início' : 'Sair';
     $('quem').classList.remove('hide');
     $('quem').textContent = m.name + ' · ' + m.email;
 
@@ -596,7 +624,17 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
       return;
     }
     $('forcado').classList.add('hide');
+    $('abrir').classList.add('hide');
     $('painel').classList.remove('hide');
+
+    /*
+     * Loja que pertence a uma conta de pessoa não tem senha nem sessões
+     * próprias — elas são da conta. Mostrar os dois blocos aqui ofereceria
+     * trocar uma senha que não existe.
+     */
+    $('blocoSenha').className = m.ownedByPerson ? 'hide' : '';
+    $('blocoSessoes').className = m.ownedByPerson ? 'hide' : '';
+    $('contaDaPessoa').className = m.ownedByPerson ? '' : 'hide';
 
     pintarEstado(m, dados.application);
     pintarAvisos(dados.notifications, dados.unread);
@@ -720,16 +758,30 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
   function deslogar() {
     guardar(null);
     dadosAtuais = null;
+    // Quem chegou pelo funil volta para o funil; quem tem login próprio de
+    // loja fica aqui, na tela de entrada dela.
+    if (pessoa) { location.href = '/conta'; return; }
     $('painel').classList.add('hide');
     $('forcado').classList.add('hide');
+    $('abrir').classList.add('hide');
     $('porta').classList.remove('hide');
     $('sair').classList.add('hide');
     $('quem').classList.add('hide');
   }
 
+  function mostrarAbrirLoja() {
+    $('porta').classList.add('hide');
+    $('painel').classList.add('hide');
+    $('forcado').classList.add('hide');
+    $('abrir').classList.remove('hide');
+    $('sair').classList.remove('hide');
+  }
+
   function carregar() {
     return api('/api/dashboard').then(mostrar).catch(function (err) {
-      if (String(err.message).indexOf('login') !== -1) deslogar();
+      // A pessoa está autenticada, só não abriu loja ainda: é convite, não erro.
+      if (err.code === 'NO_STORE') { mostrarAbrirLoja(); return; }
+      if (err.code === 'UNAUTHENTICATED') deslogar();
       else alerta(err.message);
     });
   }
@@ -742,7 +794,7 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
     return api(caminho, { method: 'POST', body: JSON.stringify(corpo) })
       .then(function (r) {
         guardar(r.token);
-        $('password').value = ''; $('cSenha').value = ''; $('cSenha2').value = '';
+        $('password').value = '';
         return carregar();
       })
       .catch(function (err) { alerta(err.message); })
@@ -758,17 +810,6 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
     if (e.key === 'Enter') $('entrar').click();
   });
 
-  $('criar').addEventListener('click', function () {
-    if ($('cSenha').value !== $('cSenha2').value) {
-      alerta('As duas senhas não são iguais.'); return;
-    }
-    entrarCom('/api/signup', {
-      companyName: $('cEmpresa').value.trim(),
-      email: $('cEmail').value.trim(),
-      password: $('cSenha').value
-    }, $('criar'));
-  });
-
   $('pedirSenha').addEventListener('click', function () {
     alerta('');
     $('pedirSenha').disabled = true;
@@ -782,10 +823,27 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
   });
 
   $('sair').addEventListener('click', function () {
+    // Sessão da pessoa não se encerra daqui: ela vale para o checkout também,
+    // e sair da loja não pode deslogar a pessoa do resto.
+    if (pessoa) { location.href = '/inicio'; return; }
     api('/api/logout', { method: 'POST' }).catch(function () {}).then(function () {
       guardar(null);
       location.reload();
     });
+  });
+
+  $('abrirLoja').addEventListener('click', function () {
+    alerta('');
+    var nome = $('aNome').value.trim();
+    if (nome.length < 2) { alerta('Informe o nome da sua loja.'); return; }
+    $('abrirLoja').disabled = true;
+    api('/api/open-store', { method: 'POST', body: JSON.stringify({ companyName: nome }) })
+      .then(function () {
+        alerta('Loja aberta. Agora envie os dados da empresa para análise.', 'o');
+        return carregar();
+      })
+      .catch(function (err) { alerta(err.message); })
+      .then(function () { $('abrirLoja').disabled = false; });
   });
 
   // ═══════════ Senha temporária ═══════════
@@ -1031,7 +1089,7 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
       .then(function () { $('pedirSaque').disabled = false; });
   });
 
-  if (sessao) carregar();
+  if (sessao || pessoa) carregar();
 })();
 </script>
 </body>

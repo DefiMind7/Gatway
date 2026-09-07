@@ -10,6 +10,8 @@ import apiRoutes from './routes/api.routes';
 import { DOCS_PAGE_HTML } from './routes/docs.page';
 import { PARTNER_PAGE_HTML } from './routes/partner.page';
 import { HOME_PAGE_HTML } from './routes/home.page';
+import { ACCOUNT_PAGE_HTML } from './routes/account.page';
+import { HUB_PAGE_HTML } from './routes/hub.page';
 import merchantRoutes from './routes/merchant.routes';
 import healthRoutes from './routes/health.routes';
 import quoteRoutes from './routes/quote.routes';
@@ -64,13 +66,26 @@ export function createApp(): Application {
   });
 
   /**
-   * Raiz: as três portas.
+   * O funil de entrada: raiz -> conta -> hub.
    *
-   * Sem isto o domínio puro respondia 404 — o caso mais comum quando alguém
-   * recebe o link por mensagem e abre sem o caminho.
+   * A raiz é pública e vende; `/conta` cria ou abre a sessão da pessoa; só em
+   * `/inicio` aparece a escolha entre comprar e vender. A ordem importa porque
+   * as duas operações precisam de conta para fazer qualquer coisa — oferecer a
+   * escolha antes do login era mostrar três caminhos que davam todos no mesmo
+   * formulário, só que depois de a pessoa já ter escolhido.
+   *
+   * As páginas são estáticas: quem manda para /conta quando não há sessão é o
+   * próprio JS delas, ao ver que não tem token. Redirecionar no servidor não
+   * daria — o token vive no localStorage, e o servidor não o enxerga.
    */
   app.get('/', (_req, res) => {
     res.type('html').send(HOME_PAGE_HTML);
+  });
+  app.get('/conta', (_req, res) => {
+    res.type('html').send(ACCOUNT_PAGE_HTML);
+  });
+  app.get('/inicio', (_req, res) => {
+    res.type('html').send(HUB_PAGE_HTML);
   });
 
   // Portal da loja: faturamento e saque. Separado do painel do operador.

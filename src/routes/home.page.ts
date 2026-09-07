@@ -1,11 +1,14 @@
 /**
- * Porta de entrada do domínio.
+ * Landing pública — o topo do funil.
  *
- * Antes, `/` respondia 404: quem chegasse pelo endereço puro — o caso mais
- * comum quando alguém recebe o link por mensagem — batia num erro. São três
- * públicos diferentes chegando pelo mesmo lugar, e cada um precisa de uma
- * porta: quem quer comprar cripto, quem tem loja e quer vender, e a loja que
- * já é parceira e vem ver o faturamento.
+ * Aqui não há escolha de operação, só duas: entrar ou criar conta. As três
+ * portas (comprar, vender, carteira) mudaram para `/inicio`, depois do login.
+ *
+ * A razão é que cada uma delas precisa de conta para fazer qualquer coisa:
+ * comprar exige carteira, vender exige loja, e as duas exigem alguém a quem
+ * responder. Oferecê-las antes do cadastro dava a impressão de três caminhos
+ * abertos que na prática desembocavam todos no mesmo formulário de login —
+ * só que mais adiante, depois da pessoa já ter escolhido.
  */
 export const HOME_PAGE_HTML = String.raw`<!doctype html>
 <html lang="pt">
@@ -19,50 +22,41 @@ export const HOME_PAGE_HTML = String.raw`<!doctype html>
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--tx);
        font:15px/1.65 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
-  main{max-width:660px;margin:0 auto;
-       padding:calc(48px + env(safe-area-inset-top)) 20px calc(60px + env(safe-area-inset-bottom))}
-  h1{font-size:30px;line-height:1.25;margin:0 0 10px;letter-spacing:-.02em}
-  p.lead{color:var(--dim);font-size:16px;margin:0 0 36px}
-  a.porta{display:block;text-decoration:none;color:inherit;background:var(--panel);
-          border:1px solid var(--line);border-radius:14px;padding:20px;margin-bottom:12px;
-          transition:border-color .15s}
-  a.porta:hover{border-color:var(--acc)}
-  a.porta b{display:block;font-size:17px;font-weight:650;margin-bottom:3px}
-  a.porta span{color:var(--dim);font-size:14px}
-  a.porta .seta{float:right;color:var(--acc);font-size:18px;line-height:1.2}
-  .destaque{border-color:#2c4a7a;background:linear-gradient(180deg,#1a2130,var(--panel))}
-  footer{color:var(--dim);font-size:12px;margin-top:36px;text-align:center;line-height:1.9}
-  footer a{color:var(--dim)}
+  main{max-width:620px;margin:0 auto;
+       padding:calc(60px + env(safe-area-inset-top)) 20px calc(60px + env(safe-area-inset-bottom))}
+  h1{font-size:34px;line-height:1.2;margin:0 0 12px;letter-spacing:-.025em}
+  p.lead{color:var(--dim);font-size:17px;margin:0 0 34px}
+  a.cta{display:block;text-align:center;text-decoration:none;background:var(--acc);color:#07101f;
+        font-weight:650;border-radius:10px;padding:16px;margin:0 0 10px;font-size:16px}
+  a.cta.ghost{background:var(--panel);color:var(--tx);border:1px solid var(--line);font-weight:500}
+  .provas{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;
+          margin:38px 0 0;padding:24px 0 0;border-top:1px solid var(--line)}
+  .provas b{display:block;font-size:14px;margin-bottom:3px}
+  .provas span{color:var(--dim);font-size:13px}
+  footer{color:var(--dim);font-size:12px;text-align:center;margin-top:34px;line-height:1.9}
+  a{color:var(--acc)}
 </style>
 </head>
 <body>
 <main>
   <h1>Pagamentos em reais,<br>entrega em cripto.</h1>
   <p class="lead">
-    Pix e cartão de um lado, Solana do outro. Sem intermediário entre o pagamento e a carteira.
+    Pix e cartão de um lado, Solana do outro. Compre para você, ou receba
+    pagamentos na sua loja — com a mesma conta.
   </p>
 
-  <a class="porta" href="/pay">
-    <span class="seta">&rarr;</span>
-    <b>Comprar SOL</b>
-    <span>Pague por Pix ou cartão e receba na sua carteira. Criamos uma para você se não tiver.</span>
-  </a>
+  <a class="cta" href="/conta?novo=1">Criar a minha conta</a>
+  <a class="cta ghost" href="/conta">Já tenho conta — entrar</a>
 
-  <a class="porta destaque" href="/parceiros">
-    <span class="seta">&rarr;</span>
-    <b>Faça vendas conosco</b>
-    <span>Coloque o nosso checkout na sua loja. Seus clientes pagam em reais, você recebe
-      como preferir — em cripto ou na sua conta.</span>
-  </a>
-
-  <a class="porta" href="/loja">
-    <span class="seta">&rarr;</span>
-    <b>Já sou parceiro</b>
-    <span>Acompanhe o faturamento da sua loja e peça saque.</span>
-  </a>
+  <div class="provas">
+    <div><b>Carteira na hora</b><span>Criamos uma para você no cadastro. A chave é sua quando quiser.</span></div>
+    <div><b>Pix e cartão</b><span>Os dois trilhos, sem intermediário entre o pagamento e a carteira.</span></div>
+    <div><b>Checkout para lojas</b><span>Seus clientes pagam em reais; você recebe em cripto ou na conta.</span></div>
+  </div>
 
   <footer>
-    <a href="/docs">Documentação da API</a>
+    Quer integrar na sua loja? <a href="/parceiros">Faça vendas conosco</a><br>
+    A <a href="/docs">documentação da API</a> é pública.
   </footer>
 </main>
 </body>

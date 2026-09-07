@@ -20,13 +20,16 @@ import {
   logout,
   markNotificationsRead,
   MerchantStatus,
+  openStoreForCustomer,
   requestPasswordReset,
   resolveSession,
   revokeOtherSessions,
   rotateWebhookSecret,
   signUp,
+  storeOfCustomer,
   updateProfile,
 } from '../services/merchant-account.service';
+import { authenticate as authenticateCustomer } from '../services/customer.service';
 import { submitApplication, VOLUMES_ACEITOS } from '../services/application.service';
 import { MERCHANT_PAGE_HTML } from './merchant.page';
 import { ah } from '../utils/async-route';
@@ -54,16 +57,59 @@ function tokenDaRequisicao(req: Request): string {
   return typeof header === 'string' ? header : '';
 }
 
+/** Sessão da PESSOA (a mesma do checkout). Vem do funil de entrada. */
+function tokenDaPessoa(req: Request): string {
+  const header = req.headers['x-session'];
+  return typeof header === 'string' ? header : '';
+}
+
 interface Sessao {
   loja: Merchant;
+  /** Token da sessão da loja. Vazio quando quem entrou foi a pessoa. */
   token: string;
 }
 
+/**
+ * Duas portas para o mesmo portal.
+ *
+ * A da PESSOA é a do funil: ela entrou uma vez em /conta e a loja dela é uma
+ * consequência disso. A da LOJA é a de quem tem login próprio — lojas criadas
+ * pelo operador, e as que existiam antes do funil. Manter as duas é o que
+ * evita trancar do lado de fora quem já estava dentro.
+ */
 async function exigirLoja(req: Request): Promise<Sessao> {
-  const token = tokenDaRequisicao(req);
-  const loja = await resolveSession(token);
-  if (!loja) throw new GatewayError('faça login para continuar', 'UNAUTHENTICATED', false);
-  return { loja, token };
+  /*
+   * A pessoa vem primeiro, e só quando ela de fato tem loja.
+   *
+   * A ordem importa porque os dois tokens convivem no mesmo navegador: quem
+   * entrou uma vez pelo login antigo da loja e depois criou conta pessoal fica
+   * com os dois guardados. Se a sessão da loja vencesse, essa pessoa abriria
+   * /loja e veria a loja ERRADA — a antiga, não a dela. Preferir a pessoa
+   * quando ela tem loja resolve isso sem trancar ninguém: quem só tem o login
+   * próprio cai no segundo ramo como sempre.
+   */
+  const pessoa = await authenticateCustomer(tokenDaPessoa(req));
+  const lojaDaPessoa = pessoa ? await storeOfCustomer(pessoa.customer.id) : null;
+
+  if (lojaDaPessoa) {
+    if (!lojaDaPessoa.active) {
+      throw new GatewayError('esta loja está suspensa — fale com o suporte', 'SUSPENDED', false);
+    }
+    return { loja: lojaDaPessoa, token: '' };
+  }
+
+  const tokenLoja = tokenDaRequisicao(req);
+  if (tokenLoja) {
+    const loja = await resolveSession(tokenLoja);
+    if (loja) return { loja, token: tokenLoja };
+  }
+
+  // Autenticada, mas ainda sem loja: é convite para abrir uma, não falha.
+  if (pessoa) {
+    throw new GatewayError('você ainda não abriu uma loja nesta conta', 'NO_STORE', false);
+  }
+
+  throw new GatewayError('faça login para continuar', 'UNAUTHENTICATED', false);
 }
 
 /**
@@ -166,6 +212,42 @@ router.post('/api/sessions/revoke', ah(async (req: Request, res: Response) => {
   res.json({ revoked: await revokeOtherSessions(loja.id, token) });
 }));
 
+/**
+ * Estado da pessoa em relação a loja: tem uma? qual?
+ *
+ * É o que a porta "Faça vendas conosco" consulta antes de decidir se manda
+ * para o painel ou para o formulário de abertura.
+ */
+router.get('/api/me', ah(async (req: Request, res: Response) => {
+  const pessoa = await authenticateCustomer(tokenDaPessoa(req));
+  if (!pessoa) {
+    res.json({ authenticated: false, hasStore: false });
+    return;
+  }
+  const loja = await storeOfCustomer(pessoa.customer.id);
+  res.json({
+    authenticated: true,
+    email: pessoa.customer.email,
+    hasStore: loja !== null,
+    ...(loja ? { store: { name: loja.name, status: loja.status } } : {}),
+  });
+}));
+
+/** Abre a loja desta conta. Idempotente: chamar duas vezes devolve a mesma. */
+router.post('/api/open-store', ah(async (req: Request, res: Response) => {
+  const pessoa = await authenticateCustomer(tokenDaPessoa(req));
+  if (!pessoa) throw new GatewayError('faça login para continuar', 'UNAUTHENTICATED', false);
+
+  const body = (req.body ?? {}) as { companyName?: string };
+  const loja = await openStoreForCustomer({
+    customerId: pessoa.customer.id,
+    email: pessoa.customer.email,
+    companyName: String(body.companyName ?? ''),
+  });
+
+  res.status(201).json({ name: loja.name, status: loja.status });
+}));
+
 // ─────────────────────────── Painel da loja ───────────────────────────
 
 /** Estado da conta, faturamento, saldo, saques, vendas e avisos. */
@@ -208,6 +290,9 @@ router.get('/api/dashboard', ah(async (req: Request, res: Response) => {
       status: loja.status,
       active: loja.active,
       mustChangePassword: loja.mustChangePassword,
+      /// true quando o acesso é pela conta da pessoa: aí senha e dispositivos
+      /// são de lá, e o painel da loja não deve oferecer os dois.
+      ownedByPerson: loja.ownerId !== null,
       payoutWallet: loja.payoutWallet,
       preferredPayout: loja.preferredPayout,
       payoutCurrency: loja.payoutCurrency,

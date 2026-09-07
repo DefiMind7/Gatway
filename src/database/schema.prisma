@@ -289,6 +289,13 @@ model Customer {
   intents     DepositIntent[]
   withdrawals Withdrawal[]
 
+  /// A loja desta pessoa, se ela abriu uma.
+  ///
+  /// É o que faz o funil ter um login só: a pessoa entra uma vez e escolhe
+  /// depois se vai comprar ou vender. Sem isto, quem quisesse as duas coisas
+  /// precisaria de duas contas com duas senhas — e ninguém entende por quê.
+  merchant    Merchant?
+
   clientIp    String?
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
@@ -392,7 +399,15 @@ model Merchant {
   returnUrl   String?
 
   // ── Portal da loja ──
-  /// scrypt. Escolhida pelo dono da loja no cadastro.
+  /// A pessoa dona desta loja.
+  ///
+  /// Quando existe, o acesso ao portal é pela conta dela — a loja não tem
+  /// senha própria. Null nas lojas criadas direto pelo operador e nas que
+  /// nasceram antes do funil: essas continuam entrando pelo login da loja.
+  ownerId String?   @unique
+  owner   Customer? @relation(fields: [ownerId], references: [id])
+
+  /// scrypt. Só nas lojas com login próprio (ver `ownerId`).
   passwordHash String?
   passwordChangedAt DateTime?
   /// true depois de uma senha temporária emitida pelo operador: a loja entra,

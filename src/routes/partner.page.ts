@@ -55,8 +55,8 @@ export const PARTNER_PAGE_HTML = String.raw`<!doctype html>
   <section>
     <h2>Como funciona</h2>
     <ol class="passos">
-      <li><b>1</b><span>Você cria a sua conta — leva um minuto e não custa nada.</span></li>
-      <li><b>2</b><span>De dentro dela, envia os dados da empresa para análise.</span></li>
+      <li><b>1</b><span>Você cria a sua conta — a mesma que serve para comprar cripto.</span></li>
+      <li><b>2</b><span>Abre a sua loja e envia os dados da empresa para análise.</span></li>
       <li><b>3</b><span>A resposta aparece no seu painel. Aprovado, você mesmo emite a chave de API.</span></li>
       <li><b>4</b><span>Integra seguindo a <a href="/docs" target="_blank" rel="noopener">documentação</a> e começa a vender.</span></li>
     </ol>
@@ -72,8 +72,8 @@ export const PARTNER_PAGE_HTML = String.raw`<!doctype html>
     </div>
   </section>
 
-  <a class="cta" href="/loja">Criar a minha conta</a>
-  <a class="cta ghost" href="/loja">Já tenho conta — entrar</a>
+  <a class="cta" href="/conta?novo=1">Criar a minha conta</a>
+  <a class="cta ghost" href="/conta">Já tenho conta — entrar</a>
 
   <footer>
     A análise é feita por uma pessoa e a resposta chega no painel da sua conta.<br>

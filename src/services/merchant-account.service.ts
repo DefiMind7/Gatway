@@ -152,6 +152,75 @@ export async function signUp(input: SignUpInput): Promise<Merchant> {
   return loja;
 }
 
+/**
+ * Abre a loja de uma pessoa que já tem conta.
+ *
+ * É o caminho do funil: a pessoa entra uma vez, e só depois decide se quer
+ * comprar ou vender. A loja nasce sem senha própria de propósito — quem entra
+ * no portal dela é a conta da pessoa. Dar à loja uma segunda senha para o
+ * mesmo humano seria pedir que ele guardasse duas credenciais para a mesma
+ * relação, e a segunda é sempre a que se perde.
+ */
+export async function openStoreForCustomer(input: {
+  customerId: string;
+  email: string;
+  companyName: string;
+}): Promise<Merchant> {
+  const name = String(input.companyName ?? '').trim().slice(0, 120);
+  if (name.length < 2) {
+    throw new GatewayError('informe o nome da sua loja', 'INVALID_BODY', false);
+  }
+
+  const jaTem = await prisma.merchant.findUnique({ where: { ownerId: input.customerId } });
+  if (jaTem) return jaTem;
+
+  // O e-mail é único entre lojas. Se já existe uma com este endereço mas sem
+  // dono, é uma loja antiga (criada pelo operador, ou pelo login próprio):
+  // adotá-la é melhor do que recusar o cadastro de quem é obviamente ela.
+  const orfa = await prisma.merchant.findUnique({ where: { email: input.email } });
+  if (orfa) {
+    if (orfa.ownerId !== null) {
+      throw new GatewayError(
+        'já existe uma loja com este e-mail ligada a outra conta',
+        'EMAIL_IN_USE',
+        false,
+      );
+    }
+    const adotada = await prisma.merchant.update({
+      where: { id: orfa.id },
+      data: { ownerId: input.customerId },
+    });
+    log.warn({ merchantId: adotada.id }, 'loja existente ligada à conta da pessoa');
+    return adotada;
+  }
+
+  const loja = await prisma.merchant.create({
+    data: {
+      name,
+      email: input.email,
+      ownerId: input.customerId,
+      status: MerchantStatus.SEM_PEDIDO,
+      webhookSecret: 'whsec_' + crypto.randomBytes(24).toString('base64url'),
+    },
+  });
+
+  await notify(
+    loja.id,
+    NotificationKind.AVISO,
+    'Loja criada',
+    'Para começar a cobrar, envie o pedido de análise com os dados da sua empresa.',
+    'pedido',
+  );
+
+  log.warn({ merchantId: loja.id, ownerId: input.customerId }, 'loja aberta pela conta da pessoa');
+  return loja;
+}
+
+/** A loja desta pessoa, se ela tiver aberto uma. */
+export async function storeOfCustomer(customerId: string): Promise<Merchant | null> {
+  return prisma.merchant.findUnique({ where: { ownerId: customerId } });
+}
+
 // ─────────────────────────── Sessão ───────────────────────────
 
 /** Tentativas erradas antes do bloqueio, e por quanto tempo ele dura. */
