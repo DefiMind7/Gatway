@@ -1,10 +1,10 @@
 import crypto from 'node:crypto';
-import { promisify } from 'node:util';
 import { Prisma, type Customer, type CustomerWallet } from '@prisma/client';
 import { config, LAMPORTS_PER_SOL } from '../config';
 import { prisma } from '../database/client';
 import { DepositIntentStatus, GatewayError, OrderStatus } from '../types';
 import { logger } from '../utils/logger';
+import { dummyVerify, hashPassword, verifyPassword } from '../utils/password';
 import { getBalance } from './solana.service';
 import { createWallet } from './wallet.service';
 
@@ -24,35 +24,7 @@ import { createWallet } from './wallet.service';
 
 const log = logger.child({ scope: 'customer' });
 
-const scrypt = promisify(crypto.scrypt) as (
-  password: string,
-  salt: Buffer,
-  keylen: number,
-) => Promise<Buffer>;
-
 const SESSION_DAYS = 30;
-const KEY_LENGTH = 64;
-
-// ─────────────────────────── Senha ───────────────────────────
-
-async function hashPassword(password: string): Promise<string> {
-  const salt = crypto.randomBytes(16);
-  const derived = await scrypt(password, salt, KEY_LENGTH);
-  return `scrypt$${salt.toString('base64')}$${derived.toString('base64')}`;
-}
-
-/**
- * Compara em tempo constante. Uma senha errada e um formato inválido levam o
- * mesmo tempo e devolvem a mesma coisa — diferença aqui vira oráculo.
- */
-async function verifyPassword(password: string, stored: string): Promise<boolean> {
-  const [scheme, saltB64, hashB64] = stored.split('$');
-  if (scheme !== 'scrypt' || !saltB64 || !hashB64) return false;
-
-  const expected = Buffer.from(hashB64, 'base64');
-  const derived = await scrypt(password, Buffer.from(saltB64, 'base64'), expected.length);
-  return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
-}
 
 // ─────────────────────────── Sessão ───────────────────────────
 
@@ -213,11 +185,26 @@ export async function login(input: {
   if (!customer) {
     // Trabalho equivalente ao de uma verificação real, para o tempo de
     // resposta não denunciar a existência da conta.
-    await hashPassword(input.password ?? '');
+    await dummyVerify(String(input.password ?? ''));
     throw invalid;
   }
-  if (!(await verifyPassword(String(input.password ?? ''), customer.passwordHash))) {
-    throw invalid;
+
+  const conferido = await verifyPassword(String(input.password ?? ''), customer.passwordHash);
+  if (!conferido.ok) throw invalid;
+
+  /*
+   * Migração silenciosa do custo do hash.
+   *
+   * Este é o único instante em que a senha em claro existe — logo, o único em
+   * que dá para re-gravá-la com parâmetros mais caros. Sem isto, uma conta
+   * criada hoje ficaria presa ao custo de hoje para sempre.
+   */
+  if (conferido.needsUpgrade) {
+    const novo = await hashPassword(String(input.password ?? ''));
+    await prisma.customer
+      .update({ where: { id: customer.id }, data: { passwordHash: novo } })
+      .catch(() => undefined);
+    log.info({ customerId: customer.id }, 'hash de senha migrado para o custo atual');
   }
 
   await prisma.customer.update({

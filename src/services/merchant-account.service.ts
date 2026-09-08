@@ -4,7 +4,7 @@ import { prisma } from '../database/client';
 import { GatewayError } from '../types';
 import { logger } from '../utils/logger';
 import { assertHttpsUrl } from './merchant.service';
-import { hashMerchantPassword, verifyMerchantPassword } from './merchant-ledger.service';
+import { dummyVerify, hashPassword, verifyPassword } from '../utils/password';
 import { NotificationKind, notify } from './merchant-notify.service';
 
 /**
@@ -131,7 +131,7 @@ export async function signUp(input: SignUpInput): Promise<Merchant> {
       name,
       email,
       status: MerchantStatus.SEM_PEDIDO,
-      passwordHash: await hashMerchantPassword(senha),
+      passwordHash: await hashPassword(senha),
       passwordChangedAt: new Date(),
       // Nasce agora: é com ele que a loja confere os webhooks que mandamos, e
       // isso não depende de aprovação nenhuma.
@@ -249,7 +249,12 @@ export async function login(
   const email = String(emailBruto ?? '').trim().toLowerCase();
   const loja = await prisma.merchant.findUnique({ where: { email } });
 
-  if (!loja || !loja.passwordHash || !loja.active) throw invalido;
+  if (!loja || !loja.passwordHash || !loja.active) {
+    // Mesmo custo de uma verificação real: sem isto, a resposta instantânea
+    // para um e-mail inexistente separa cliente de não-cliente pelo relógio.
+    await dummyVerify(senha);
+    throw invalido;
+  }
 
   if (loja.lockedUntil && loja.lockedUntil.getTime() > Date.now()) {
     const minutos = Math.ceil((loja.lockedUntil.getTime() - Date.now()) / 60_000);
@@ -260,7 +265,8 @@ export async function login(
     );
   }
 
-  if (!(await verifyMerchantPassword(senha, loja.passwordHash))) {
+  const conferido = await verifyPassword(senha, loja.passwordHash);
+  if (!conferido.ok) {
     const falhas = loja.failedLogins + 1;
     await prisma.merchant.update({
       where: { id: loja.id },
@@ -273,6 +279,15 @@ export async function login(
       log.warn({ merchantId: loja.id, falhas }, 'conta de loja bloqueada por tentativas');
     }
     throw invalido;
+  }
+
+  // Único instante com a senha em claro: é aqui que o custo do hash sobe.
+  if (conferido.needsUpgrade) {
+    const novo = await hashPassword(senha);
+    await prisma.merchant
+      .update({ where: { id: loja.id }, data: { passwordHash: novo } })
+      .catch(() => undefined);
+    log.info({ merchantId: loja.id }, 'hash de senha da loja migrado para o custo atual');
   }
 
   const token = crypto.randomBytes(32).toString('base64url');
@@ -373,7 +388,7 @@ export async function changePassword(
   if (!merchant.passwordHash) {
     throw new GatewayError('esta conta ainda não tem senha', 'NO_PASSWORD', false);
   }
-  if (!(await verifyMerchantPassword(atual, merchant.passwordHash))) {
+  if (!(await verifyPassword(atual, merchant.passwordHash)).ok) {
     throw new GatewayError('a senha atual está incorreta', 'INVALID_CREDENTIALS', false);
   }
   if (atual === nova) {
@@ -384,7 +399,7 @@ export async function changePassword(
   await prisma.merchant.update({
     where: { id: merchant.id },
     data: {
-      passwordHash: await hashMerchantPassword(nova),
+      passwordHash: await hashPassword(nova),
       passwordChangedAt: new Date(),
       mustChangePassword: false,
       failedLogins: 0,
@@ -448,7 +463,7 @@ export async function resolvePasswordReset(
     prisma.merchant.update({
       where: { id: pedido.merchantId },
       data: {
-        passwordHash: await hashMerchantPassword(temporaria),
+        passwordHash: await hashPassword(temporaria),
         passwordChangedAt: new Date(),
         mustChangePassword: true,
         failedLogins: 0,

@@ -3,6 +3,7 @@ import pinoHttp from 'pino-http';
 import { config } from './config';
 import { logger } from './utils/logger';
 import { GatewayError, type RawBodyRequest } from './types';
+import { securityHeaders } from './utils/security-headers';
 import adminRoutes from './routes/admin.routes';
 import depositRoutes from './routes/deposit.routes';
 import pwaRoutes from './routes/pwa.routes';
@@ -24,6 +25,10 @@ export function createApp(): Application {
   app.disable('x-powered-by');
   // Respeita X-Forwarded-* atrás de proxy/LB (req.ip correto nos logs).
   app.set('trust proxy', true);
+
+  // Antes de tudo: vale para toda resposta, inclusive as de erro. As páginas
+  // geradas em /s/ sobrescrevem o CSP com o próprio, mais restrito.
+  app.use(securityHeaders);
 
   app.use(
     pinoHttp({

@@ -1,5 +1,3 @@
-import crypto from 'node:crypto';
-import { promisify } from 'node:util';
 import { Prisma, type DepositIntent, type Merchant } from '@prisma/client';
 import { PublicKey } from '@solana/web3.js';
 import { config, LAMPORTS_PER_SOL, TOTAL_BPS } from '../config';
@@ -28,12 +26,6 @@ import { createOrderFromEvent, dispatchOrderPipeline } from './order.service';
 
 const log = logger.child({ scope: 'merchant-ledger' });
 
-const scrypt = promisify(crypto.scrypt) as (
-  password: string,
-  salt: Buffer,
-  keylen: number,
-) => Promise<Buffer>;
-
 export const LedgerType = { VENDA: 'venda', SAQUE: 'saque', AJUSTE: 'ajuste' } as const;
 export const WithdrawalStatus = {
   PENDENTE: 'pendente',
@@ -44,19 +36,15 @@ export const WithdrawalStatus = {
 
 // ─────────────────────────── Senha do portal ───────────────────────────
 
-export async function hashMerchantPassword(password: string): Promise<string> {
-  const salt = crypto.randomBytes(16);
-  const derived = await scrypt(password, salt, 64);
-  return `scrypt$${salt.toString('base64')}$${derived.toString('base64')}`;
-}
-
-export async function verifyMerchantPassword(password: string, stored: string): Promise<boolean> {
-  const [scheme, saltB64, hashB64] = stored.split('$');
-  if (scheme !== 'scrypt' || !saltB64 || !hashB64) return false;
-  const expected = Buffer.from(hashB64, 'base64');
-  const derived = await scrypt(password, Buffer.from(saltB64, 'base64'), expected.length);
-  return derived.length === expected.length && crypto.timingSafeEqual(derived, expected);
-}
+/**
+ * Reexportados do módulo único de senha.
+ *
+ * Viviam aqui, com uma segunda cópia do scrypt — e as duas cópias derivaram
+ * parâmetros diferentes ao longo do tempo. Um lugar só para isto é o que
+ * garante que reforçar o custo reforce para todo mundo.
+ */
+export { hashPassword as hashMerchantPassword } from '../utils/password';
+export { verifyPassword as verifyMerchantPasswordDetailed } from '../utils/password';
 
 // ─────────────────────────── Crédito de venda ───────────────────────────
 

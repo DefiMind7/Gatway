@@ -172,6 +172,8 @@ const envSchema = z.object({
    * fora do repositório, com backup.
    */
   WALLET_ENCRYPTION_KEY: z.string().optional(),
+  /** Chave ANTERIOR, válida só durante uma rotação. Ver scripts/rotate-wallet-key.js. */
+  WALLET_ENCRYPTION_KEY_PREVIOUS: z.string().optional(),
 
   // ── Mercado Pago (trilho CARD) ──
   /**
@@ -380,6 +382,29 @@ const depositMethods = (() => {
  * cliente em claro no banco. Falha no boot, não em runtime.
  */
 const walletKey = env.WALLET_ENCRYPTION_KEY ?? '';
+
+/**
+ * A chave precisa ser 32 bytes ALEATÓRIOS, não uma frase de 32 letras.
+ *
+ * A verificação antiga contava caracteres, e uma frase escolhida por uma
+ * pessoa passava. O problema é o que acontece depois: uma frase é derivada
+ * com um único SHA-256, que uma GPU calcula aos bilhões por segundo. Quem
+ * levasse um dump do banco quebraria a frase em horas e abriria a chave
+ * privada de TODOS os clientes — a cifra é AES-256, mas o segredo real seria
+ * a frase, e ela vale o que vale.
+ *
+ * Hex de 64 caracteres ou base64 de 32 bytes: os dois formatos que o
+ * `npm run walletkey` produz.
+ */
+function chaveTemEntropiaReal(raw: string): boolean {
+  if (/^[0-9a-fA-F]{64}$/.test(raw)) return true;
+  try {
+    return Buffer.from(raw, 'base64').length === 32;
+  } catch {
+    return false;
+  }
+}
+
 if (env.WALLET_GENERATION && walletKey.length < 32) {
   throw new ConfigError([
     'WALLET_ENCRYPTION_KEY é obrigatória com WALLET_GENERATION=true e precisa de ' +
@@ -387,6 +412,20 @@ if (env.WALLET_GENERATION && walletKey.length < 32) {
       'privadas dos clientes ficariam em claro no banco.',
   ]);
 }
+
+/**
+ * Chave fraca: alarme, não parada.
+ *
+ * A tentação era recusar o boot. Não dá: uma instalação que já esteja rodando
+ * com uma frase tem carteiras de clientes cifradas com ela, e derrubar o
+ * processo trancaria o dinheiro dessas pessoas para consertar um risco que é
+ * grave mas não imediato. Fica o aviso — e existe caminho de saída, que é
+ * `npm run rotate:walletkey`.
+ *
+ * Para instalação nova o aviso aparece antes de existir qualquer carteira, que
+ * é exatamente quando trocar a chave não custa nada.
+ */
+export const WALLET_KEY_IS_WEAK = env.WALLET_GENERATION === true && !chaveTemEntropiaReal(walletKey);
 
 /** Valida a carteira de gás no boot: endereço errado só apareceria na varredura. */
 const gasFeeWallet = (() => {
@@ -551,6 +590,16 @@ export const config = {
   wallet: {
     enabled: env.WALLET_GENERATION,
     encryptionKey: walletKey,
+    /**
+     * Chave anterior, para LER o que ainda não foi re-cifrado.
+     *
+     * Sem ela, trocar a chave tornaria ilegível a carteira de todos os
+     * clientes no instante do deploy — e não haveria volta, porque a chave
+     * antiga já teria saído do ambiente. Com ela, a troca vira um período
+     * em que os dois formatos convivem, e o script de rotação converte
+     * linha a linha sem pressa.
+     */
+    previousEncryptionKey: env.WALLET_ENCRYPTION_KEY_PREVIOUS ?? '',
   },
 
   /** Trilho de cartão. Vazio = desligado (e `CARD` não sobe em DEPOSIT_METHODS). */

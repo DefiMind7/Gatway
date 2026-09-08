@@ -57,6 +57,16 @@ function encryptionKey(): Buffer {
   return crypto.createHash('sha256').update(raw, 'utf8').digest();
 }
 
+/** A chave ANTERIOR, se houver rotação em curso. Só para leitura. */
+function previousEncryptionKey(): Buffer | null {
+  const raw = config.wallet.previousEncryptionKey;
+  if (!raw) return null;
+  if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, 'hex');
+  const decoded = Buffer.from(raw, 'base64');
+  if (decoded.length === 32) return decoded;
+  return crypto.createHash('sha256').update(raw, 'utf8').digest();
+}
+
 interface Sealed {
   encryptedSecret: string;
   iv: string;
@@ -74,21 +84,45 @@ function seal(secret: Uint8Array): Sealed {
   };
 }
 
-function open(wallet: Pick<CustomerWallet, 'encryptedSecret' | 'iv' | 'authTag'>): Uint8Array {
-  const decipher = crypto.createDecipheriv(
-    ALGORITHM,
-    encryptionKey(),
-    Buffer.from(wallet.iv, 'base64'),
-  );
+function abrirCom(
+  wallet: Pick<CustomerWallet, 'encryptedSecret' | 'iv' | 'authTag'>,
+  key: Buffer,
+): Uint8Array {
+  const decipher = crypto.createDecipheriv(ALGORITHM, key, Buffer.from(wallet.iv, 'base64'));
   decipher.setAuthTag(Buffer.from(wallet.authTag, 'base64'));
+  return Uint8Array.from(
+    Buffer.concat([
+      decipher.update(Buffer.from(wallet.encryptedSecret, 'base64')),
+      decipher.final(),
+    ]),
+  );
+}
+
+/**
+ * Abre a carteira com a chave atual e, se falhar, com a anterior.
+ *
+ * O fallback é o que torna a troca de chave possível SEM perder dinheiro de
+ * cliente. Sem ele, o instante do deploy com a chave nova tornaria ilegível a
+ * carteira de todo mundo, e não haveria volta — a chave antiga já teria saído
+ * do ambiente. Com ele, as duas convivem enquanto o script de rotação
+ * converte as linhas, e cada carteira aberta pelo caminho antigo é re-cifrada
+ * na hora (ver `rekeyIfNeeded`).
+ *
+ * Tentar a segunda chave é seguro: o GCM autentica antes de entregar o texto,
+ * então uma chave errada lança em vez de devolver lixo.
+ */
+function open(wallet: Pick<CustomerWallet, 'encryptedSecret' | 'iv' | 'authTag'>): Uint8Array {
   try {
-    return Uint8Array.from(
-      Buffer.concat([
-        decipher.update(Buffer.from(wallet.encryptedSecret, 'base64')),
-        decipher.final(),
-      ]),
-    );
+    return abrirCom(wallet, encryptionKey());
   } catch {
+    const anterior = previousEncryptionKey();
+    if (anterior) {
+      try {
+        return abrirCom(wallet, anterior);
+      } catch {
+        /* cai no erro comum abaixo */
+      }
+    }
     // Falha de tag = chave de cifra errada ou registro adulterado. Não há
     // caminho de recuperação, e mascarar isso seria pior do que gritar.
     throw new GatewayError(

@@ -20,6 +20,15 @@ import { GatewayError } from '../types';
 const ALGORITHM = 'aes-256-gcm';
 const IV_BYTES = 12; // recomendado para GCM
 
+function derivar(raw: string): Buffer {
+  if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, 'hex');
+
+  const decoded = Buffer.from(raw, 'base64');
+  if (decoded.length === 32) return decoded;
+
+  return crypto.createHash('sha256').update(raw, 'utf8').digest();
+}
+
 /** Deriva a chave de 32 bytes do env, aceitando hex, base64 ou frase longa. */
 function chave(): Buffer {
   const raw = config.wallet.encryptionKey;
@@ -31,12 +40,13 @@ function chave(): Buffer {
     );
   }
 
-  if (/^[0-9a-f]{64}$/i.test(raw)) return Buffer.from(raw, 'hex');
+  return derivar(raw);
+}
 
-  const decoded = Buffer.from(raw, 'base64');
-  if (decoded.length === 32) return decoded;
-
-  return crypto.createHash('sha256').update(raw, 'utf8').digest();
+/** A chave anterior, quando existe. Só para LER durante uma rotação. */
+function chaveAnterior(): Buffer | null {
+  const raw = config.wallet.previousEncryptionKey;
+  return raw ? derivar(raw) : null;
 }
 
 export interface Sealed {
@@ -56,16 +66,33 @@ export function seal(texto: string): Sealed {
   };
 }
 
-export function open(sealed: Sealed): string {
-  const decipher = crypto.createDecipheriv(ALGORITHM, chave(), Buffer.from(sealed.iv, 'base64'));
+function abrirCom(sealed: Sealed, k: Buffer): string {
+  const decipher = crypto.createDecipheriv(ALGORITHM, k, Buffer.from(sealed.iv, 'base64'));
   decipher.setAuthTag(Buffer.from(sealed.tag, 'base64'));
+  return Buffer.concat([
+    decipher.update(Buffer.from(sealed.enc, 'base64')),
+    decipher.final(),
+  ]).toString('utf8');
+}
 
+/**
+ * Abre com a chave atual; se falhar, tenta a anterior.
+ *
+ * A tag do GCM torna essa tentativa segura: ela não "quase abre" com a chave
+ * errada, ou autentica ou lança. Não há oráculo aqui — só duas chaves nossas.
+ */
+export function open(sealed: Sealed): string {
   try {
-    return Buffer.concat([
-      decipher.update(Buffer.from(sealed.enc, 'base64')),
-      decipher.final(),
-    ]).toString('utf8');
+    return abrirCom(sealed, chave());
   } catch {
+    const anterior = chaveAnterior();
+    if (anterior) {
+      try {
+        return abrirCom(sealed, anterior);
+      } catch {
+        /* cai no erro comum abaixo */
+      }
+    }
     // A tag do GCM não fecha: ou a chave mudou, ou a linha foi adulterada.
     // Os dois casos exigem intervenção humana e nenhum admite adivinhação.
     throw new GatewayError(

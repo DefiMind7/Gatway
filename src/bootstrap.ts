@@ -1,6 +1,6 @@
 import type { Server } from 'node:http';
 import { createApp } from './app';
-import { config, LAMPORTS_PER_SOL } from './config';
+import { config, WALLET_KEY_IS_WEAK, LAMPORTS_PER_SOL } from './config';
 import { disconnectDatabase, prisma } from './database/client';
 import { previewSplit } from './services/distribution.service';
 import { retryPendingOrders } from './services/order.service';
@@ -46,6 +46,22 @@ async function main(): Promise<void> {
     split = (await previewSplit(BigInt(LAMPORTS_PER_SOL))).map((p) => `${p.label}=${p.sol}`);
   } catch (err) {
     split = { error: err instanceof Error ? err.message : String(err) };
+  }
+
+  /*
+   * Alarme de chave fraca, alto e a cada subida.
+   *
+   * Não derruba o processo de propósito: quem já roda com uma frase tem
+   * carteiras de clientes cifradas com ela, e parar trancaria o dinheiro
+   * dessas pessoas. O aviso repete até alguém rotacionar.
+   */
+  if (WALLET_KEY_IS_WEAK) {
+    logger.error(
+      { acao: 'npm run rotate:walletkey' },
+      'WALLET_ENCRYPTION_KEY não tem 32 bytes aleatórios — parece uma frase. ' +
+        'Ela é derivada por um único SHA-256 e resiste mal a força bruta; ' +
+        'é o segredo que protege a chave privada de TODOS os clientes. Rotacione.',
+    );
   }
 
   logger.info(
