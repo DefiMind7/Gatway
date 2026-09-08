@@ -431,6 +431,18 @@ model Merchant {
   /// pode reescrever o passado.
   commissionBps Int @default(3000)
 
+  // ── Construtor de sites (Claude com a chave da própria loja) ──
+  /// Chave da API da Anthropic, AES-256-GCM. A loja traz a dela e é ela quem
+  /// paga o uso — nós nunca faturamos geração, e nunca vemos a chave em claro
+  /// depois que ela entra.
+  aiKeyEnc    String?
+  aiKeyIv     String?
+  aiKeyTag    String?
+  /// Só os últimos caracteres, para a loja reconhecer qual chave está lá.
+  aiKeyHint   String?
+  aiKeySetAt  DateTime?
+
+  site          MerchantSite?
   sessions      MerchantSession[]
   ledger        MerchantLedgerEntry[]
   withdrawals   MerchantWithdrawal[]
@@ -540,6 +552,39 @@ model MerchantPasswordReset {
 
   @@index([status, createdAt])
   @@index([merchantId])
+}
+
+/// O site da loja, gerado por Claude a partir de um prompt.
+///
+/// Duas cópias do HTML de propósito: `draftHtml` é o que a última geração
+/// produziu, `publishedHtml` é o que está no ar. Sem essa separação, cada
+/// tentativa de melhorar a loja iria direto para o público — e um prompt
+/// infeliz derrubaria uma loja que estava vendendo.
+model MerchantSite {
+  id         String   @id @default(cuid())
+  merchantId String   @unique
+  merchant   Merchant @relation(fields: [merchantId], references: [id], onDelete: Cascade)
+
+  /// Endereço público: /s/<slug>. Único, e é o nome que a loja divulga.
+  slug  String @unique
+  title String
+
+  /// O último pedido em linguagem natural. Guardado para a loja iterar em
+  /// cima do que pediu, em vez de reescrever tudo a cada ajuste.
+  prompt String?
+
+  draftHtml     String?
+  publishedHtml String?
+
+  published   Boolean   @default(false)
+  publishedAt DateTime?
+  /// Quantas vezes já foi gerado. Só para o painel mostrar histórico de uso.
+  generations Int       @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([published])
 }
 
 /// Sessão do portal da loja. Mesmo desenho da sessão de cliente: guardamos o

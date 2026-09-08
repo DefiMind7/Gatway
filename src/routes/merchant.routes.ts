@@ -31,6 +31,15 @@ import {
 } from '../services/merchant-account.service';
 import { authenticate as authenticateCustomer } from '../services/customer.service';
 import { submitApplication, VOLUMES_ACEITOS } from '../services/application.service';
+import {
+  clearAiKey,
+  generateSite,
+  getSite,
+  publishSite,
+  setAiKey,
+  unpublishSite,
+} from '../services/site-builder.service';
+import { config } from '../config';
 import { MERCHANT_PAGE_HTML } from './merchant.page';
 import { ah } from '../utils/async-route';
 
@@ -525,6 +534,108 @@ router.post('/api/withdrawals', ah(async (req: Request, res: Response) => {
   });
 
   res.status(201).json(resultado);
+}));
+
+// ─────────────────────────── Construtor de site ───────────────────────────
+
+/**
+ * A chave da Anthropic é da loja.
+ *
+ * Entra por aqui, sai daqui cifrada, e nunca mais é devolvida em claro — a
+ * tela mostra só os últimos caracteres, o bastante para a pessoa reconhecer
+ * qual chave está guardada.
+ */
+router.post('/api/ai-key', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  const body = (req.body ?? {}) as { key?: string };
+  const hint = await setAiKey(loja.id, String(body.key ?? ''));
+  res.json({ ok: true, hint });
+}));
+
+router.delete('/api/ai-key', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  await clearAiKey(loja.id);
+  res.json({ ok: true });
+}));
+
+/** Estado do site: rascunho, publicado, endereço. */
+router.get('/api/site', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  const site = await getSite(loja.id);
+  const base = config.mercadopago.publicBaseUrl.replace(/\/+$/, '');
+
+  res.json({
+    hasAiKey: loja.aiKeyEnc !== null,
+    aiKeyHint: loja.aiKeyHint,
+    site: site
+      ? {
+          slug: site.slug,
+          url: `${base}/s/${site.slug}`,
+          prompt: site.prompt,
+          hasDraft: site.draftHtml !== null,
+          published: site.published,
+          publishedAt: site.publishedAt?.toISOString() ?? null,
+          generations: site.generations,
+          /// true quando o rascunho difere do que está no ar: é o que o painel
+          /// usa para avisar que há mudança esperando publicação.
+          pending: site.draftHtml !== null && site.draftHtml !== site.publishedHtml,
+        }
+      : null,
+  });
+}));
+
+/**
+ * Gera o site.
+ *
+ * Demora: são dezenas de milhares de tokens saindo do modelo. O cliente da
+ * página espera com o botão travado, e o timeout do axios é generoso de
+ * propósito — cortar no meio desperdiçaria tokens que a loja já pagou.
+ */
+router.post('/api/site/generate', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  exigirAprovada(loja);
+
+  const body = (req.body ?? {}) as { prompt?: string };
+  const base = config.mercadopago.publicBaseUrl.replace(/\/+$/, '');
+  const { site, usage } = await generateSite(loja, String(body.prompt ?? ''), base);
+
+  res.json({
+    slug: site.slug,
+    url: `${base}/s/${site.slug}`,
+    generations: site.generations,
+    usage,
+  });
+}));
+
+/**
+ * O rascunho, para a loja ver antes de pôr no ar.
+ *
+ * Devolvido como JSON, e não como página: a rota exige sessão, e um link
+ * comum aberto em aba nova não teria como mandar o cabeçalho. O painel busca
+ * o HTML autenticado e o injeta num iframe com `sandbox`, que é o que lhe dá
+ * origem opaca — sem esse atributo o rascunho rodaria dentro da nossa origem,
+ * com o painel logado do outro lado.
+ */
+router.get('/api/site/preview', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  const site = await getSite(loja.id);
+  if (!site?.draftHtml) throw new GatewayError('nenhum rascunho ainda', 'NO_DRAFT', false);
+  res.json({ html: site.draftHtml });
+}));
+
+router.post('/api/site/publish', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  exigirAprovada(loja);
+  const site = await publishSite(loja.id);
+  const base = config.mercadopago.publicBaseUrl.replace(/\/+$/, '');
+  log.warn({ merchantId: loja.id, slug: site.slug }, 'loja publicou o site');
+  res.json({ ok: true, url: `${base}/s/${site.slug}` });
+}));
+
+router.post('/api/site/unpublish', ah(async (req: Request, res: Response) => {
+  const { loja } = await exigirLojaLiberada(req);
+  await unpublishSite(loja.id);
+  res.json({ ok: true });
 }));
 
 export default router;

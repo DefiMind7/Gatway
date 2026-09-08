@@ -13,6 +13,7 @@ import { HOME_PAGE_HTML } from './routes/home.page';
 import { ACCOUNT_PAGE_HTML } from './routes/account.page';
 import { HUB_PAGE_HTML } from './routes/hub.page';
 import merchantRoutes from './routes/merchant.routes';
+import siteRoutes from './routes/site.routes';
 import healthRoutes from './routes/health.routes';
 import quoteRoutes from './routes/quote.routes';
 import webhookRoutes from './routes/webhook.routes';
@@ -87,6 +88,13 @@ export function createApp(): Application {
   app.get('/inicio', (_req, res) => {
     res.type('html').send(HUB_PAGE_HTML);
   });
+
+  /**
+   * Sites das lojas, gerados por IA. Servidos em origem opaca — ver
+   * `site.routes`. Ficam sob um prefixo curto porque é endereço que a loja
+   * divulga para o cliente dela.
+   */
+  app.use('/s', siteRoutes);
 
   // Portal da loja: faturamento e saque. Separado do painel do operador.
   app.use('/loja', merchantRoutes);

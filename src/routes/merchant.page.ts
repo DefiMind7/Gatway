@@ -87,6 +87,12 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
   .linha>div{flex:1;min-width:200px}
   .hide{display:none!important}
   .scroll{overflow-x:auto}
+  iframe.previa{width:100%;height:520px;border:1px solid var(--line);border-radius:10px;
+                background:#fff;margin-top:12px}
+  .passos{list-style:none;margin:0;padding:0;display:grid;gap:9px}
+  .passos li{display:flex;gap:10px;font-size:13px;color:var(--dim)}
+  .passos b{flex:0 0 22px;height:22px;display:grid;place-items:center;border-radius:50%;
+            background:var(--panel2);border:1px solid var(--line);color:var(--tx);font-size:11px}
   a{color:var(--acc)}
   @media (max-width:640px){
     .scroll table,.scroll thead,.scroll tbody,.scroll th,.scroll td,.scroll tr{display:block}
@@ -186,6 +192,7 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
       <button data-aba="pedido">Pedido</button>
       <button data-aba="vendas">Vendas</button>
       <button data-aba="saques">Saques</button>
+      <button data-aba="site">Meu site</button>
       <button data-aba="integracao">Integração</button>
       <button data-aba="config">Configurações</button>
     </div>
@@ -323,6 +330,75 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
           <th>Quando</th><th>Valor</th><th>Forma</th><th>Estado</th><th>Comprovante</th>
         </tr></thead><tbody></tbody></table></div>
       </section>
+    </div>
+
+    <!-- ── Meu site ── -->
+    <div data-a="site" class="hide">
+      <div id="siteBloqueado" class="banner a hide">
+        O construtor de sites abre quando a sua loja for aprovada — ele publica uma loja
+        que já cobra, e cobrar depende da análise.
+      </div>
+
+      <div id="siteBox">
+        <section>
+          <h2>Sua chave da Anthropic</h2>
+          <p class="dim" style="font-size:13px;margin:0 0 10px">
+            O site é escrito pelo Claude com a <b>sua</b> chave: o uso é cobrado na sua conta
+            da Anthropic, não na nossa, e por isso não há limite nosso de quantas vezes você
+            gera. Guardamos a chave cifrada e nunca a mostramos de novo.
+          </p>
+          <ol class="passos">
+            <li><b>1</b><span>Entre em console.anthropic.com e crie uma API key.</span></li>
+            <li><b>2</b><span>Cole aqui. Ela começa com sk-ant-.</span></li>
+            <li><b>3</b><span>Descreva a sua loja e gere quantas versões quiser.</span></li>
+          </ol>
+
+          <div id="chaveGuardada" class="segredo hide">
+            Chave guardada: <span class="mono" id="dicaChave">—</span>
+            <div style="margin-top:10px"><button class="ghost mini" id="removerChaveIa">Remover</button></div>
+          </div>
+
+          <div id="chaveForm">
+            <label for="chaveIa">Chave da API</label>
+            <input id="chaveIa" type="password" class="mono" placeholder="sk-ant-…" autocomplete="off">
+            <button class="ghost" id="salvarChaveIa">Guardar chave</button>
+          </div>
+        </section>
+
+        <section>
+          <h2>Descreva a sua loja</h2>
+          <p class="dim" style="font-size:13px;margin:0 0 4px" id="ajudaPrompt">
+            Diga o que você vende, para quem, e como quer que pareça. Depois da primeira
+            versão, peça ajustes — "deixe o topo mais escuro", "acrescente uma seção de
+            perguntas frequentes" — e ele altera o que já existe.
+          </p>
+          <textarea id="promptSite" maxlength="4000" style="min-height:120px"
+            placeholder="Ex.: uma loja de café especial em grãos, tom sóbrio, com três produtos: coado, espresso e um kit presente."></textarea>
+          <button id="gerarSite">Gerar o site</button>
+          <p class="dim" style="font-size:12px;margin:10px 0 0" id="statusSite"></p>
+        </section>
+
+        <section id="previaBox" class="hide">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap">
+            <h2 style="margin:0">Prévia</h2>
+            <div style="display:flex;gap:8px;flex-wrap:wrap">
+              <button class="ghost mini" id="recarregarPrevia">Recarregar</button>
+              <button class="mini" id="publicarSite">Publicar</button>
+            </div>
+          </div>
+          <p class="dim" style="font-size:12px;margin:8px 0 0" id="avisoPendente"></p>
+          <iframe class="previa" id="previa" sandbox="allow-scripts allow-forms"></iframe>
+        </section>
+
+        <section id="noArBox" class="hide">
+          <h2>No ar</h2>
+          <p style="font-size:13px;margin:0">
+            <a id="linkSite" href="#" target="_blank" rel="noopener" class="mono">—</a>
+          </p>
+          <p class="dim" style="font-size:12px;margin:8px 0 0" id="publicadoEm">—</p>
+          <button class="danger" id="tirarDoAr">Tirar do ar</button>
+        </section>
+      </div>
     </div>
 
     <!-- ── Integração ── -->
@@ -532,6 +608,7 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
       painels[j].className = painels[j].getAttribute('data-a') === nome ? '' : 'hide';
     }
     if (nome === 'config') carregarSessoes();
+    if (nome === 'site') carregarSite();
     window.scrollTo({ top: 0 });
   }
 
@@ -1007,6 +1084,127 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
       alerta(r.revoked + ' sessão(ões) encerrada(s).', 'o');
       return carregarSessoes();
     }).catch(function (err) { alerta(err.message); });
+  });
+
+  // ═══════════ Construtor de site ═══════════
+
+  var estadoSite = null;
+
+  function carregarSite() {
+    var aprovada = dadosAtuais && dadosAtuais.merchant.status === 'aprovado';
+    $('siteBloqueado').className = aprovada ? 'banner a hide' : 'banner a';
+    $('siteBox').className = aprovada ? '' : 'hide';
+    if (!aprovada) return;
+
+    return api('/api/site').then(function (d) {
+      estadoSite = d;
+
+      $('chaveGuardada').className = d.hasAiKey ? 'segredo' : 'segredo hide';
+      $('chaveForm').className = d.hasAiKey ? 'hide' : '';
+      $('dicaChave').textContent = d.aiKeyHint || '—';
+
+      var s = d.site;
+      $('previaBox').className = s && s.hasDraft ? '' : 'hide';
+      $('noArBox').className = s && s.published ? '' : 'hide';
+
+      if (s) {
+        if (s.prompt && !$('promptSite').value) $('promptSite').value = s.prompt;
+        $('linkSite').textContent = s.url;
+        $('linkSite').href = s.url;
+        $('publicadoEm').textContent = s.publishedAt
+          ? 'No ar desde ' + quando(s.publishedAt) + '. Versões geradas: ' + s.generations + '.'
+          : '';
+        $('avisoPendente').innerHTML = s.pending && s.published
+          ? '<span class="warn">Há mudanças no rascunho que ainda não estão no ar.</span>'
+          : '';
+        $('gerarSite').textContent = s.hasDraft ? 'Aplicar mudança' : 'Gerar o site';
+        $('ajudaPrompt').textContent = s.hasDraft
+          ? 'Peça o ajuste que quiser. Ele altera a loja que já existe, em vez de começar do zero.'
+          : 'Diga o que você vende, para quem, e como quer que pareça.';
+        if (s.hasDraft) carregarPrevia();
+      }
+    }).catch(function (err) { alerta(err.message); });
+  }
+
+  function carregarPrevia() {
+    return api('/api/site/preview').then(function (r) {
+      // srcdoc num iframe COM sandbox: origem opaca. Sem o atributo, o
+      // rascunho rodaria na nossa origem, com o painel logado ao lado.
+      $('previa').srcdoc = r.html;
+    }).catch(function () { /* sem rascunho ainda */ });
+  }
+
+  $('salvarChaveIa').addEventListener('click', function () {
+    alerta('');
+    var chave = $('chaveIa').value.trim();
+    if (!chave) { alerta('Cole a sua chave da Anthropic.'); return; }
+    $('salvarChaveIa').disabled = true;
+    api('/api/ai-key', { method: 'POST', body: JSON.stringify({ key: chave }) })
+      .then(function () {
+        $('chaveIa').value = '';
+        alerta('Chave guardada. Agora descreva a sua loja.', 'o');
+        return carregarSite();
+      })
+      .catch(function (err) { alerta(err.message); })
+      .then(function () { $('salvarChaveIa').disabled = false; });
+  });
+
+  $('removerChaveIa').addEventListener('click', function () {
+    if (!confirm('Sem a chave você não consegue gerar nem alterar o site. O que já está no ar continua no ar.\n\nRemover?')) return;
+    api('/api/ai-key', { method: 'DELETE' })
+      .then(function () { alerta('Chave removida.', 'o'); return carregarSite(); })
+      .catch(function (err) { alerta(err.message); });
+  });
+
+  $('gerarSite').addEventListener('click', function () {
+    alerta('');
+    var pedido = $('promptSite').value.trim();
+    if (pedido.length < 10) { alerta('Descreva a sua loja com um pouco mais de detalhe.'); return; }
+
+    $('gerarSite').disabled = true;
+    // A geração leva um bom tempo e o silêncio faria a pessoa achar que travou.
+    var desde = Date.now();
+    $('statusSite').innerHTML = '<span class="warn">Escrevendo a sua loja… costuma levar de 30 a 90 segundos.</span>';
+    var relogio = setInterval(function () {
+      var seg = Math.round((Date.now() - desde) / 1000);
+      $('statusSite').innerHTML = '<span class="warn">Escrevendo a sua loja… ' + seg + 's</span>';
+    }, 1000);
+
+    api('/api/site/generate', { method: 'POST', body: JSON.stringify({ prompt: pedido }) })
+      .then(function (r) {
+        clearInterval(relogio);
+        $('statusSite').innerHTML = '<span class="ok">Pronto.</span> Versão ' + r.generations +
+          ' · ' + r.usage.outputTokens + ' tokens de saída, cobrados na sua conta da Anthropic.' +
+          ' Veja a prévia abaixo e publique quando gostar.';
+        return carregarSite();
+      })
+      .catch(function (err) {
+        clearInterval(relogio);
+        $('statusSite').textContent = '';
+        alerta(err.message);
+      })
+      .then(function () { $('gerarSite').disabled = false; });
+  });
+
+  $('recarregarPrevia').addEventListener('click', carregarPrevia);
+
+  $('publicarSite').addEventListener('click', function () {
+    alerta('');
+    $('publicarSite').disabled = true;
+    api('/api/site/publish', { method: 'POST', body: '{}' })
+      .then(function (r) {
+        alerta('No ar em ' + r.url, 'o');
+        return carregarSite();
+      })
+      .catch(function (err) { alerta(err.message); })
+      .then(function () { $('publicarSite').disabled = false; });
+  });
+
+  $('tirarDoAr').addEventListener('click', function () {
+    if (!confirm('A loja sai do ar e quem abrir o endereço vê um aviso. O conteúdo fica guardado e você pode publicar de novo.\n\nContinuar?')) return;
+    api('/api/site/unpublish', { method: 'POST', body: '{}' })
+      .then(function () { alerta('Site fora do ar.', 'o'); return carregarSite(); })
+      .catch(function (err) { alerta(err.message); });
   });
 
   // ═══════════ Saques ═══════════
