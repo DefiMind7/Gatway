@@ -87,6 +87,11 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
   .linha>div{flex:1;min-width:200px}
   .hide{display:none!important}
   .scroll{overflow-x:auto}
+  .trilha{display:flex;gap:8px;margin-bottom:14px;flex-wrap:wrap}
+  .trilha .etapa{font-size:12px;padding:6px 12px;border-radius:20px;color:var(--dim);
+                 background:var(--panel);border:1px solid var(--line)}
+  .trilha .etapa.on{color:#07101f;background:var(--acc);border-color:var(--acc);font-weight:650}
+  .trilha .etapa.feita{color:var(--ok);border-color:#1f5f4f}
   iframe.previa{width:100%;height:520px;border:1px solid var(--line);border-radius:10px;
                 background:#fff;margin-top:12px}
   .passos{list-style:none;margin:0;padding:0;display:grid;gap:9px}
@@ -117,22 +122,102 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
 
   <div id="alert" class="banner e hide"></div>
 
-  <!-- ═══════════ Pessoa logada, sem loja ainda ═══════════ -->
-  <div id="abrir" class="hide">
-    <section>
-      <h2>Abrir a minha loja</h2>
+  <!-- ═══════════ Cadastro da loja: abrir + análise, num ato só ═══════════ -->
+  <div id="cadastro" class="hide">
+    <div id="cadRecusado" class="banner e hide"></div>
+
+    <div class="trilha">
+      <span class="etapa on" data-e="1">1 · Empresa</span>
+      <span class="etapa" data-e="2">2 · Negócio</span>
+      <span class="etapa" data-e="3">3 · Recebimento</span>
+    </div>
+
+    <!-- passo 1 -->
+    <section data-passo="1">
+      <h2>Sua empresa</h2>
       <p class="dim" style="font-size:13px;margin:0 0 4px">
-        Você já tem conta. Dê um nome à loja e ela nasce ligada a ela — sem senha
-        separada, sem segundo cadastro. Cobrar de verdade depende da análise, que
-        você pede logo depois.
+        Quem é a loja. Só o nome é obrigatório; o resto acelera a análise.
       </p>
-      <label for="aNome">Nome da sua loja</label>
-      <input id="aNome" placeholder="Como a sua loja é conhecida" maxlength="120">
-      <button id="abrirLoja">Abrir loja</button>
-      <p class="dim" style="font-size:12px;margin:14px 0 0">
-        <a href="/inicio">Voltar ao início</a>
-      </p>
+      <label for="cNome">Nome da loja <span style="color:var(--acc)">*</span></label>
+      <input id="cNome" placeholder="Como a sua loja é conhecida" maxlength="120">
+      <div class="linha">
+        <div><label for="cRazao">Razão social</label><input id="cRazao" maxlength="160"></div>
+        <div><label for="cCnpj">CNPJ</label><input id="cCnpj" maxlength="20" placeholder="00.000.000/0001-00"></div>
+      </div>
+      <div class="linha">
+        <div><label for="cTelefone">Telefone</label><input id="cTelefone" maxlength="30" placeholder="(11) 90000-0000"></div>
+        <div><label for="cSite">Site</label><input id="cSite" maxlength="200" placeholder="https://sualoja.com"></div>
+      </div>
+      <button data-ir="2">Continuar</button>
     </section>
+
+    <!-- passo 2 -->
+    <section data-passo="2" class="hide">
+      <h2>Seu negócio</h2>
+      <p class="dim" style="font-size:13px;margin:0 0 4px">
+        Estes números são o que a análise olha. Faixa aproximada basta — não
+        precisa ser exato, precisa ser honesto.
+      </p>
+      <label for="cDescricao">O que você vende <span style="color:var(--acc)">*</span></label>
+      <textarea id="cDescricao" maxlength="2000" placeholder="Produtos, público, como funciona hoje"></textarea>
+      <div class="linha">
+        <div><label for="cTempo">Há quanto tempo opera</label><select id="cTempo"><option value="">prefiro não informar</option></select></div>
+        <div><label for="cFaturamento">Faturamento hoje</label><select id="cFaturamento"><option value="">prefiro não informar</option></select></div>
+      </div>
+      <div class="linha">
+        <div><label for="cTicket">Ticket médio</label><select id="cTicket"><option value="">prefiro não informar</option></select></div>
+        <div><label for="cVolume">Volume esperado aqui</label><select id="cVolume"><option value="">prefiro não informar</option></select></div>
+      </div>
+      <div class="linha">
+        <button class="ghost" data-ir="1">Voltar</button>
+        <button data-ir="3">Continuar</button>
+      </div>
+    </section>
+
+    <!-- passo 3 -->
+    <section data-passo="3" class="hide">
+      <h2>Como você recebe</h2>
+      <p class="dim" style="font-size:13px;margin:0 0 4px">
+        É para cá que o seu dinheiro sai quando você pedir saque. Dá para mudar
+        depois, nas configurações.
+      </p>
+      <label for="cMetodo">Forma de recebimento</label>
+      <select id="cMetodo">
+        <option value="FIAT">Dinheiro — na minha conta bancária</option>
+        <option value="SOL">Cripto — SOL na minha carteira</option>
+      </select>
+
+      <div id="cBlocoFiat">
+        <label for="cMoeda">Moeda</label>
+        <select id="cMoeda">
+          <option value="BRL">Real (BRL)</option>
+          <option value="USD">Dólar (USD)</option>
+          <option value="EUR">Euro (EUR)</option>
+        </select>
+        <label for="cConta">Conta que vai receber <span style="color:var(--acc)">*</span></label>
+        <input id="cConta" placeholder="Chave Pix, IBAN ou dados bancários">
+        <p class="dim" style="font-size:11px;margin:5px 0 0">
+          Em real, a chave Pix basta. Em dólar ou euro, informe IBAN/SWIFT e o titular.
+        </p>
+      </div>
+
+      <div id="cBlocoSol" class="hide">
+        <label for="cCarteira">Sua carteira Solana <span style="color:var(--acc)">*</span></label>
+        <input id="cCarteira" class="mono" placeholder="Cole o endereço que vai receber" spellcheck="false">
+      </div>
+
+      <p class="dim" style="font-size:12px;margin:16px 0 0">
+        Comissão do gateway: <b id="cComissao">30%</b> sobre cada venda paga.
+      </p>
+      <div class="linha">
+        <button class="ghost" data-ir="2">Voltar</button>
+        <button id="enviarCadastro">Enviar para análise</button>
+      </div>
+    </section>
+
+    <p class="dim" style="font-size:12px;text-align:center;margin:16px 0 0">
+      <a href="/inicio">Voltar ao início</a>
+    </p>
   </div>
 
   <!-- ═══════════ Entrada ═══════════ -->
@@ -227,50 +312,7 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
         <h2>Pedido de integração</h2>
         <div id="pedidoFeito" class="hide"></div>
 
-        <div id="pedidoForm">
-          <p class="dim" style="font-size:13px;margin:0 0 4px">
-            Conte quem é a sua empresa. A resposta aparece aqui no painel — não vai por e-mail.
-          </p>
-
-          <label for="pEmpresa">Nome da empresa</label>
-          <input id="pEmpresa" maxlength="120" placeholder="Como a sua loja é conhecida">
-
-          <div class="linha">
-            <div>
-              <label for="pRazao">Razão social</label>
-              <input id="pRazao" maxlength="160" placeholder="Nome registrado">
-            </div>
-            <div>
-              <label for="pCnpj">CNPJ</label>
-              <input id="pCnpj" maxlength="20" placeholder="00.000.000/0001-00">
-            </div>
-          </div>
-
-          <div class="linha">
-            <div>
-              <label for="pTelefone">Telefone</label>
-              <input id="pTelefone" maxlength="30" placeholder="(11) 90000-0000">
-            </div>
-            <div>
-              <label for="pSite">Site</label>
-              <input id="pSite" maxlength="200" placeholder="https://sualoja.com">
-            </div>
-          </div>
-
-          <label for="pVolume">Volume esperado por mês</label>
-          <select id="pVolume"><option value="">prefiro não informar</option></select>
-
-          <label for="pWebhook">URL de webhook (opcional)</label>
-          <input id="pWebhook" maxlength="300" placeholder="https://sualoja.com/webhooks/gateway">
-          <p class="dim" style="font-size:11px;margin:5px 0 0">
-            É para lá que avisamos quando um pedido é pago. Dá para configurar depois.
-          </p>
-
-          <label for="pDescricao">O que você vende</label>
-          <textarea id="pDescricao" maxlength="2000" placeholder="Produtos, público, como funciona hoje"></textarea>
-
-          <button id="enviarPedido">Enviar para análise</button>
-        </div>
+        <div id="pedidoForm" class="hide"></div>
       </section>
     </div>
 
@@ -701,7 +743,18 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
       return;
     }
     $('forcado').classList.add('hide');
-    $('abrir').classList.add('hide');
+
+    /*
+     * Sem pedido (ou recusado) o painel não tem o que mostrar: nada foi
+     * vendido, nada pode ser sacado, nenhuma chave existe. Em vez de zeros
+     * com um aviso, a pessoa vê o cadastro — que é o que falta fazer.
+     */
+    if (m.status === 'sem_pedido' || m.status === 'recusado') {
+      mostrarCadastro(dados);
+      return;
+    }
+
+    $('cadastro').classList.add('hide');
     $('painel').classList.remove('hide');
 
     /*
@@ -725,40 +778,14 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
       'Comissão do gateway: ' + (m.commissionBps / 100).toFixed(2) +
       '% sobre cada venda. Já retido: ' + brl(b.totalCommission) + '.';
 
-    // ── aba Pedido ──
-    var jaPediu = m.status === 'em_analise' || m.status === 'aprovado';
-    $('pedidoForm').className = jaPediu ? 'hide' : '';
-    $('pedidoFeito').className = jaPediu ? '' : 'hide';
-    if (jaPediu) {
-      $('pedidoFeito').innerHTML = m.status === 'aprovado'
-        ? '<div class="banner o" style="margin:0">Pedido aprovado em ' +
-          esc(quando(dados.application && dados.application.reviewedAt)) + '.</div>'
-        : '<div class="banner a" style="margin:0">Pedido enviado em ' +
-          esc(quando(dados.application && dados.application.createdAt)) +
-          '. Estamos analisando.</div>';
-    } else {
-      if ($('pVolume').options.length <= 1) {
-        (m.volumes || []).forEach(function (v) {
-          var o = document.createElement('option');
-          o.value = v; o.textContent = v;
-          $('pVolume').appendChild(o);
-        });
-      }
-      // Só preenche o que está vazio: um pedido recusado volta com o que a
-      // loja escreveu, e sobrescrever apagaria a correção em digitação.
-      if (!$('pEmpresa').value) $('pEmpresa').value = m.name || '';
-      if (!$('pRazao').value) $('pRazao').value = m.legalName || '';
-      if (!$('pCnpj').value) $('pCnpj').value = m.taxId || '';
-      if (!$('pTelefone').value) $('pTelefone').value = m.phone || '';
-      if (!$('pSite').value) $('pSite').value = m.website || '';
-      if (!$('pWebhook').value) $('pWebhook').value = m.callbackUrl || '';
-      if (!$('pDescricao').value && dados.application) {
-        $('pDescricao').value = dados.application.description || '';
-      }
-      if (dados.application && dados.application.expectedVolume) {
-        $('pVolume').value = dados.application.expectedVolume;
-      }
-    }
+    // ── aba Pedido: agora é só o retrato do que foi enviado ──
+    $('pedidoFeito').className = '';
+    $('pedidoFeito').innerHTML = m.status === 'aprovado'
+      ? '<div class="banner o" style="margin:0">Pedido aprovado em ' +
+        esc(quando(dados.application && dados.application.reviewedAt)) + '.</div>'
+      : '<div class="banner a" style="margin:0">Pedido enviado em ' +
+        esc(quando(dados.application && dados.application.createdAt)) +
+        '. Estamos analisando.</div>';
 
     // ── aba Integração ──
     var aprovada = m.status === 'aprovado';
@@ -840,24 +867,148 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
     if (pessoa) { location.href = '/conta'; return; }
     $('painel').classList.add('hide');
     $('forcado').classList.add('hide');
-    $('abrir').classList.add('hide');
+    $('cadastro').classList.add('hide');
     $('porta').classList.remove('hide');
     $('sair').classList.add('hide');
     $('quem').classList.add('hide');
   }
 
-  function mostrarAbrirLoja() {
+  /**
+   * O cadastro no lugar do painel vazio.
+   *
+   * Enquanto a loja não pode cobrar, o painel não tem o que mostrar — e uma
+   * tela cheia de zeros com um aviso de "você não pode fazer nada aqui" é a
+   * pior recepção possível para quem acabou de decidir vender com a gente.
+   */
+  function mostrarCadastro(dados) {
     $('porta').classList.add('hide');
     $('painel').classList.add('hide');
     $('forcado').classList.add('hide');
-    $('abrir').classList.remove('hide');
+    $('cadastro').classList.remove('hide');
     $('sair').classList.remove('hide');
+    $('sair').textContent = 'Início';
+
+    var m = dados && dados.merchant;
+    var pedido = dados && dados.application;
+
+    if (m && m.status === 'recusado') {
+      $('cadRecusado').className = 'banner e';
+      $('cadRecusado').textContent =
+        'Pedido anterior não aprovado. ' +
+        ((pedido && pedido.reviewNote) || 'Confira os dados e envie de novo.');
+    } else {
+      $('cadRecusado').className = 'banner e hide';
+    }
+
+    if (m) {
+      if (!$('cNome').value) $('cNome').value = m.name || '';
+      if (!$('cRazao').value) $('cRazao').value = m.legalName || '';
+      if (!$('cCnpj').value) $('cCnpj').value = m.taxId || '';
+      if (!$('cTelefone').value) $('cTelefone').value = m.phone || '';
+      if (!$('cSite').value) $('cSite').value = m.website || '';
+      if (m.commissionBps) $('cComissao').textContent = (m.commissionBps / 100).toFixed(0) + '%';
+    }
+    if (pedido && !$('cDescricao').value) $('cDescricao').value = pedido.description || '';
+
+    // As listas vêm de /api/me porque quem preenche isto ainda pode não ter
+    // loja — e o dashboard, que era a fonte antiga, recusa quem não tem.
+    api('/api/me')
+      .then(function (me) { preencherOpcoes(me.options || {}); })
+      .catch(function () { /* sem listas: os campos viram opcionais */ });
+
+    irParaPasso(1);
   }
+
+  var opcoesPreenchidas = false;
+  function preencherOpcoes(o) {
+    if (opcoesPreenchidas) return;
+    opcoesPreenchidas = true;
+    var mapa = [
+      ['cTempo', o.tempos], ['cFaturamento', o.faturamentos],
+      ['cTicket', o.tickets], ['cVolume', o.volumes]
+    ];
+    mapa.forEach(function (par) {
+      (par[1] || []).forEach(function (v) {
+        var o = document.createElement('option');
+        o.value = v; o.textContent = v;
+        $(par[0]).appendChild(o);
+      });
+    });
+  }
+
+  function irParaPasso(n) {
+    var secoes = $('cadastro').querySelectorAll('[data-passo]');
+    for (var i = 0; i < secoes.length; i++) {
+      secoes[i].className = secoes[i].getAttribute('data-passo') === String(n) ? '' : 'hide';
+    }
+    var etapas = $('cadastro').querySelectorAll('.etapa');
+    for (var j = 0; j < etapas.length; j++) {
+      var e = Number(etapas[j].getAttribute('data-e'));
+      etapas[j].className = 'etapa' + (e === n ? ' on' : e < n ? ' feita' : '');
+    }
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  $('cadastro').addEventListener('click', function (e) {
+    var ir = e.target.getAttribute('data-ir');
+    if (!ir) return;
+    alerta('');
+    // Validação só ao AVANÇAR: voltar para corrigir não pode ser bloqueado
+    // pelo próprio campo que a pessoa voltou para corrigir.
+    if (Number(ir) > 1 && !$('cNome').value.trim()) {
+      alerta('Informe o nome da sua loja.'); irParaPasso(1); return;
+    }
+    if (Number(ir) > 2 && $('cDescricao').value.trim().length < 10) {
+      alerta('Conte em uma linha o que você vende.'); irParaPasso(2); return;
+    }
+    irParaPasso(Number(ir));
+  });
+
+  $('cMetodo').addEventListener('change', function () {
+    var sol = $('cMetodo').value === 'SOL';
+    $('cBlocoSol').className = sol ? '' : 'hide';
+    $('cBlocoFiat').className = sol ? 'hide' : '';
+  });
+
+  $('enviarCadastro').addEventListener('click', function () {
+    alerta('');
+    var sol = $('cMetodo').value === 'SOL';
+    if (sol && !$('cCarteira').value.trim()) { alerta('Informe a carteira que vai receber.'); return; }
+    if (!sol && $('cConta').value.trim().length < 5) { alerta('Informe a conta que vai receber.'); return; }
+
+    var corpo = {
+      companyName: $('cNome').value.trim(),
+      legalName: $('cRazao').value.trim(),
+      taxId: $('cCnpj').value.trim(),
+      phone: $('cTelefone').value.trim(),
+      website: $('cSite').value.trim(),
+      description: $('cDescricao').value.trim(),
+      timeOperating: $('cTempo').value,
+      monthlyRevenue: $('cFaturamento').value,
+      averageTicket: $('cTicket').value,
+      expectedVolume: $('cVolume').value,
+      payoutMethod: $('cMetodo').value,
+      payoutCurrency: $('cMoeda').value,
+      payoutDetails: $('cConta').value.trim(),
+      payoutWallet: $('cCarteira').value.trim()
+    };
+    Object.keys(corpo).forEach(function (k) { if (!corpo[k]) delete corpo[k]; });
+
+    $('enviarCadastro').disabled = true;
+    api('/api/onboarding', { method: 'POST', body: JSON.stringify(corpo) })
+      .then(function () {
+        $('cadastro').classList.add('hide');
+        alerta('Pedido enviado. A resposta aparece aqui no painel.', 'o');
+        return carregar();
+      })
+      .catch(function (err) { alerta(err.message); })
+      .then(function () { $('enviarCadastro').disabled = false; });
+  });
 
   function carregar() {
     return api('/api/dashboard').then(mostrar).catch(function (err) {
       // A pessoa está autenticada, só não abriu loja ainda: é convite, não erro.
-      if (err.code === 'NO_STORE') { mostrarAbrirLoja(); return; }
+      if (err.code === 'NO_STORE') { mostrarCadastro(null); return; }
       if (err.code === 'UNAUTHENTICATED') deslogar();
       else alerta(err.message);
     });
@@ -909,20 +1060,6 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
     });
   });
 
-  $('abrirLoja').addEventListener('click', function () {
-    alerta('');
-    var nome = $('aNome').value.trim();
-    if (nome.length < 2) { alerta('Informe o nome da sua loja.'); return; }
-    $('abrirLoja').disabled = true;
-    api('/api/open-store', { method: 'POST', body: JSON.stringify({ companyName: nome }) })
-      .then(function () {
-        alerta('Loja aberta. Agora envie os dados da empresa para análise.', 'o');
-        return carregar();
-      })
-      .catch(function (err) { alerta(err.message); })
-      .then(function () { $('abrirLoja').disabled = false; });
-  });
-
   // ═══════════ Senha temporária ═══════════
 
   $('trocarForcado').addEventListener('click', function () {
@@ -948,35 +1085,6 @@ export const MERCHANT_PAGE_HTML = String.raw`<!doctype html>
   });
 
   // ═══════════ Pedido de análise ═══════════
-
-  $('enviarPedido').addEventListener('click', function () {
-    alerta('');
-    var corpo = {
-      companyName: $('pEmpresa').value.trim(),
-      legalName: $('pRazao').value.trim(),
-      taxId: $('pCnpj').value.trim(),
-      phone: $('pTelefone').value.trim(),
-      website: $('pSite').value.trim(),
-      callbackUrl: $('pWebhook').value.trim(),
-      expectedVolume: $('pVolume').value,
-      description: $('pDescricao').value.trim()
-    };
-    if (!corpo.companyName) { alerta('Informe o nome da empresa.'); return; }
-
-    // Campo vazio sai do corpo: o servidor distingue "não informado" de
-    // "informado em branco", e a validação de URL só roda no que veio.
-    Object.keys(corpo).forEach(function (k) { if (!corpo[k]) delete corpo[k]; });
-
-    $('enviarPedido').disabled = true;
-    api('/api/application', { method: 'POST', body: JSON.stringify(corpo) })
-      .then(function () {
-        alerta('Pedido enviado. A resposta aparece aqui no painel.', 'o');
-        abrirAba('inicio');
-        return carregar();
-      })
-      .catch(function (err) { alerta(err.message); })
-      .then(function () { $('enviarPedido').disabled = false; });
-  });
 
   // ═══════════ Integração ═══════════
 

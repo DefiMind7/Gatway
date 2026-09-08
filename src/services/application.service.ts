@@ -49,7 +49,39 @@ const VOLUMES = [
   'acima de R$ 500 mil/mês',
 ] as const;
 
+/** Faturamento que a loja já tem hoje, fora do gateway. */
+const FATURAMENTOS = [
+  'ainda não faturo',
+  'até R$ 10 mil/mês',
+  'R$ 10 mil a R$ 100 mil/mês',
+  'R$ 100 mil a R$ 1 milhão/mês',
+  'acima de R$ 1 milhão/mês',
+] as const;
+
+const TICKETS = [
+  'até R$ 50',
+  'R$ 50 a R$ 200',
+  'R$ 200 a R$ 1.000',
+  'acima de R$ 1.000',
+] as const;
+
+const TEMPOS = [
+  'ainda vou abrir',
+  'menos de 1 ano',
+  '1 a 3 anos',
+  'mais de 3 anos',
+] as const;
+
 export const VOLUMES_ACEITOS: readonly string[] = VOLUMES;
+export const FATURAMENTOS_ACEITOS: readonly string[] = FATURAMENTOS;
+export const TICKETS_ACEITOS: readonly string[] = TICKETS;
+export const TEMPOS_ACEITOS: readonly string[] = TEMPOS;
+
+/** Aceita só o que veio da lista; qualquer outra coisa vira null. */
+function daLista(valor: unknown, lista: readonly string[]): string | null {
+  const v = String(valor ?? '');
+  return lista.includes(v) ? v : null;
+}
 
 export interface ApplicationInput {
   /** A conta que está pedindo. É ela que recebe a resposta. */
@@ -62,6 +94,11 @@ export interface ApplicationInput {
   callbackUrl?: string | undefined;
   expectedVolume?: string | undefined;
   description?: string | undefined;
+  // ── financeiro ──
+  monthlyRevenue?: string | undefined;
+  averageTicket?: string | undefined;
+  timeOperating?: string | undefined;
+  payoutSummary?: string | undefined;
   clientIp?: string | undefined;
 }
 
@@ -126,10 +163,12 @@ export async function submitApplication(input: ApplicationInput): Promise<Mercha
     phone: texto(input.phone, 'telefone') || null,
     website: input.website ?? null,
     callbackUrl: input.callbackUrl ?? null,
-    expectedVolume: VOLUMES_ACEITOS.includes(String(input.expectedVolume))
-      ? String(input.expectedVolume)
-      : null,
+    expectedVolume: daLista(input.expectedVolume, VOLUMES),
     description: texto(input.description, 'descrição', { max: 2000 }) || null,
+    monthlyRevenue: daLista(input.monthlyRevenue, FATURAMENTOS),
+    averageTicket: daLista(input.averageTicket, TICKETS),
+    timeOperating: daLista(input.timeOperating, TEMPOS),
+    payoutSummary: input.payoutSummary?.trim().slice(0, 300) || null,
   };
 
   const [pedido] = await prisma.$transaction([
@@ -182,6 +221,10 @@ export async function listApplications(status?: string): Promise<
     callbackUrl: string | null;
     expectedVolume: string | null;
     description: string | null;
+    monthlyRevenue: string | null;
+    averageTicket: string | null;
+    timeOperating: string | null;
+    payoutSummary: string | null;
     status: string;
     reviewNote: string | null;
     merchantId: string | null;
@@ -207,6 +250,10 @@ export async function listApplications(status?: string): Promise<
     callbackUrl: p.callbackUrl,
     expectedVolume: p.expectedVolume,
     description: p.description,
+    monthlyRevenue: p.monthlyRevenue,
+    averageTicket: p.averageTicket,
+    timeOperating: p.timeOperating,
+    payoutSummary: p.payoutSummary,
     status: p.status,
     reviewNote: p.reviewNote,
     merchantId: p.merchantId,

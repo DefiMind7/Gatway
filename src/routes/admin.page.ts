@@ -302,7 +302,7 @@ export const ADMIN_PAGE_HTML = String.raw`<!doctype html>
     <h2>Pedidos de integração — aguardando análise</h2>
     <div id="appOut" class="dim" style="font-size:13px;margin-bottom:10px">—</div>
     <div class="scroll"><table id="appTable"><thead><tr>
-      <th>Quando</th><th>Empresa</th><th>Contato</th><th>Volume</th><th>Webhook</th>
+      <th>Quando</th><th>Empresa</th><th>Contato</th><th>Financeiro</th><th>Recebe em</th>
       <th>O que faz</th><th>Estado</th><th></th>
     </tr></thead><tbody></tbody></table></div>
     <p class="dim" style="font-size:12px;margin-bottom:0">
@@ -1111,13 +1111,34 @@ async function loadApplications() {
       (a.website ? '<br><a style="font-size:11px" target="_blank" rel="noopener" href="' +
         esc(a.website) + '">site</a>' : '');
 
+    /*
+     * O quadro financeiro numa coluna só.
+     *
+     * É o que sustenta a decisão: faturamento atual contra volume esperado
+     * diz se o número é plausível, e ticket médio separa "muitas vendas
+     * pequenas" de "poucas vendas grandes" — risco diferente, análise
+     * diferente. Espalhar isso em quatro colunas tornaria a tabela ilegível.
+     */
+    const linha = (rot, val) => val
+      ? '<div><span class="dim" style="font-size:10px">' + rot + '</span> ' + esc(val) + '</div>'
+      : '';
+    const financeiro =
+      linha('opera há', a.timeOperating) +
+      linha('fatura', a.monthlyRevenue) +
+      linha('ticket', a.averageTicket) +
+      linha('espera aqui', a.expectedVolume) || '<span class="dim">não informado</span>';
+
+    // Para onde o dinheiro sairia se aprovada. É a pergunta que fecha a análise.
+    const recebe = a.payoutSummary
+      ? '<span class="mono" style="font-size:11px">' + esc(a.payoutSummary.slice(0, 60)) + '</span>'
+      : '<span class="dim">—</span>';
+
     return '<tr>' +
       '<td data-l="Quando" class="mono dim">' + new Date(a.createdAt).toLocaleString() + '</td>' +
       '<td data-l="Empresa">' + empresa + '</td>' +
       '<td data-l="Contato">' + contato + '</td>' +
-      '<td data-l="Volume" class="dim">' + esc(a.expectedVolume || '—') + '</td>' +
-      '<td data-l="Webhook" class="mono dim" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">' +
-        esc(a.callbackUrl || '—') + '</td>' +
+      '<td data-l="Financeiro" style="font-size:12px;line-height:1.5">' + financeiro + '</td>' +
+      '<td data-l="Recebe em">' + recebe + '</td>' +
       '<td data-l="O que faz" class="dim" style="max-width:220px;white-space:normal">' +
         esc((a.description || '—').slice(0, 140)) + '</td>' +
       '<td data-l="Estado">' + (APP_ESTADO[a.status] || esc(a.status)) + '</td>' +

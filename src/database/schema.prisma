@@ -488,6 +488,22 @@ model MerchantApplication {
   expectedVolume String?
   description    String?
 
+  // ── Lado financeiro (perguntado no cadastro, antes do painel abrir) ──
+  //
+  // São os dados que sustentam a análise. Sem eles a decisão do operador é um
+  // palpite sobre um nome de empresa: não dá para dizer se o volume declarado
+  // é plausível, nem para onde o dinheiro sairia se a loja for aprovada.
+  /// Faixa de faturamento que a loja JÁ tem hoje, fora do gateway.
+  monthlyRevenue String?
+  /// Valor médio de uma venda. Ticket alto e volume baixo é risco diferente
+  /// de ticket baixo e volume alto — e o operador precisa ver os dois.
+  averageTicket  String?
+  /// Há quanto tempo a empresa opera.
+  timeOperating  String?
+  /// Retrato de como a loja pediu para receber, no momento do pedido.
+  /// A preferência corrente vive em `Merchant`; aqui fica o que foi analisado.
+  payoutSummary  String?
+
   /// `pendente` | `aprovado` | `recusado`
   status String @default("pendente")
   /// Anotação do operador — motivo da recusa, ou observação da aprovação.

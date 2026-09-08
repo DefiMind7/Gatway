@@ -30,7 +30,13 @@ import {
   updateProfile,
 } from '../services/merchant-account.service';
 import { authenticate as authenticateCustomer } from '../services/customer.service';
-import { submitApplication, VOLUMES_ACEITOS } from '../services/application.service';
+import {
+  FATURAMENTOS_ACEITOS,
+  submitApplication,
+  TEMPOS_ACEITOS,
+  TICKETS_ACEITOS,
+  VOLUMES_ACEITOS,
+} from '../services/application.service';
 import {
   clearAiKey,
   generateSite,
@@ -238,6 +244,21 @@ router.get('/api/me', ah(async (req: Request, res: Response) => {
     authenticated: true,
     email: pessoa.customer.email,
     hasStore: loja !== null,
+    /*
+     * As listas do cadastro vêm por aqui, e não pelo dashboard.
+     *
+     * Quem está preenchendo o cadastro ainda NÃO tem loja — e o dashboard,
+     * que é de onde elas vinham, responde NO_STORE para essa pessoa. O
+     * resultado eram quatro selects vazios exatamente na tela que existe para
+     * preenchê-los.
+     */
+    options: {
+      volumes: VOLUMES_ACEITOS,
+      faturamentos: FATURAMENTOS_ACEITOS,
+      tickets: TICKETS_ACEITOS,
+      tempos: TEMPOS_ACEITOS,
+      moedas: MOEDAS_SAQUE,
+    },
     ...(loja ? { store: { name: loja.name, status: loja.status } } : {}),
   });
 }));
@@ -308,6 +329,9 @@ router.get('/api/dashboard', ah(async (req: Request, res: Response) => {
       payoutFiatDetails: loja.payoutFiatDetails,
       currencies: MOEDAS_SAQUE,
       volumes: VOLUMES_ACEITOS,
+      faturamentos: FATURAMENTOS_ACEITOS,
+      tickets: TICKETS_ACEITOS,
+      tempos: TEMPOS_ACEITOS,
       commissionBps: loja.commissionBps,
       apiKeyPrefix: loja.apiKeyPrefix,
       apiKeyIssuedAt: loja.apiKeyIssuedAt?.toISOString() ?? null,
@@ -382,6 +406,101 @@ router.post('/api/application', ah(async (req: Request, res: Response) => {
     clientIp: req.ip,
   });
 
+  res.status(201).json({ id: pedido.id, status: pedido.status });
+}));
+
+/**
+ * Cadastro da loja em uma chamada só.
+ *
+ * Antes eram dois passos com um limbo entre eles: a loja abria com um nome, o
+ * painel aparecia inteiro, e nada nele funcionava até um segundo formulário
+ * ser enviado de outra aba. A pessoa chegava num lugar que dizia "você não
+ * pode fazer nada aqui" — que é a pior tela possível logo depois de decidir
+ * vender com a gente.
+ *
+ * Agora abrir a loja, informar a empresa, dizer como quer receber e pedir a
+ * análise são o mesmo ato. O painel só aparece quando há o que ver nele.
+ *
+ * As perguntas financeiras não são burocracia: sem faturamento atual, ticket
+ * médio e a conta de destino, a análise do operador é um palpite sobre um nome
+ * de empresa — e a conta é justamente para onde o dinheiro sairia se ela for
+ * aprovada.
+ */
+router.post('/api/onboarding', ah(async (req: Request, res: Response) => {
+  const pessoa = await authenticateCustomer(tokenDaPessoa(req));
+  if (!pessoa) throw new GatewayError('faça login para continuar', 'UNAUTHENTICATED', false);
+
+  const body = (req.body ?? {}) as Record<string, string | undefined>;
+  const nome = String(body.companyName ?? '').trim();
+
+  // A loja nasce (ou é reaproveitada) antes de qualquer validação de pedido:
+  // é idempotente, e assim uma recusa não obriga a recomeçar do zero.
+  const loja = await openStoreForCustomer({
+    customerId: pessoa.customer.id,
+    email: pessoa.customer.email,
+    companyName: nome,
+  });
+
+  // ── como a loja quer receber ──
+  const metodo = String(body.payoutMethod ?? 'FIAT').toUpperCase();
+  if (metodo !== 'SOL' && metodo !== 'FIAT') {
+    throw new GatewayError('forma de recebimento inválida', 'INVALID_BODY', false);
+  }
+
+  const dadosPagamento: Record<string, string> = { preferredPayout: metodo };
+  let resumoPagamento: string;
+
+  if (metodo === 'SOL') {
+    const carteira = String(body.payoutWallet ?? '').trim();
+    try {
+      new PublicKey(carteira);
+    } catch {
+      throw new GatewayError(
+        'informe uma carteira Solana válida para receber',
+        'INVALID_WALLET',
+        false,
+      );
+    }
+    dadosPagamento.payoutWallet = carteira;
+    resumoPagamento = `SOL em ${carteira}`;
+  } else {
+    const moeda = String(body.payoutCurrency ?? 'BRL').toUpperCase();
+    if (!MOEDAS_SAQUE.includes(moeda as never)) {
+      throw new GatewayError(`moeda não aceita: ${moeda}`, 'INVALID_CURRENCY', false);
+    }
+    const conta = String(body.payoutDetails ?? '').trim();
+    if (conta.length < 5) {
+      throw new GatewayError(
+        'informe a conta que vai receber (chave Pix, IBAN ou dados bancários)',
+        'INVALID_BODY',
+        false,
+      );
+    }
+    dadosPagamento.payoutCurrency = moeda;
+    dadosPagamento.payoutFiatDetails = conta.slice(0, 500);
+    resumoPagamento = `${moeda} em ${conta.slice(0, 120)}`;
+  }
+
+  await prisma.merchant.update({ where: { id: loja.id }, data: dadosPagamento });
+
+  // ── o pedido de análise ──
+  const pedido = await submitApplication({
+    merchant: { ...loja, ...dadosPagamento } as typeof loja,
+    companyName: nome || loja.name,
+    legalName: body.legalName,
+    taxId: body.taxId,
+    phone: body.phone,
+    website: body.website,
+    expectedVolume: body.expectedVolume,
+    description: body.description,
+    monthlyRevenue: body.monthlyRevenue,
+    averageTicket: body.averageTicket,
+    timeOperating: body.timeOperating,
+    payoutSummary: resumoPagamento,
+    clientIp: req.ip,
+  });
+
+  log.warn({ merchantId: loja.id }, 'loja cadastrada e enviada para análise');
   res.status(201).json({ id: pedido.id, status: pedido.status });
 }));
 
