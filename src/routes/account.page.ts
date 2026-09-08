@@ -74,7 +74,7 @@ export const ACCOUNT_PAGE_HTML = String.raw`<!doctype html>
     <label for="cEmail">E-mail</label>
     <input id="cEmail" type="email" autocomplete="username" placeholder="voce@exemplo.com">
     <label for="cSenha">Senha</label>
-    <input id="cSenha" type="password" autocomplete="new-password" placeholder="mínimo de 10 caracteres">
+    <input id="cSenha" type="password" autocomplete="new-password" placeholder="mínimo de 8 caracteres">
     <label for="cSenha2">Repita a senha</label>
     <input id="cSenha2" type="password" autocomplete="new-password">
     <button id="criar">Criar conta</button>
@@ -165,12 +165,22 @@ export const ACCOUNT_PAGE_HTML = String.raw`<!doctype html>
       .catch(function (err) { alerta(err.message); $('criar').disabled = false; });
   });
 
-  // Já logado não tem o que fazer aqui.
+  /**
+   * Já logado não tem o que fazer aqui.
+   *
+   * E vai para o destino pedido na URL, se veio com um: quem clicou em comprar e caiu aqui
+   * por um token vencido espera voltar para a compra, não para o menu.
+   */
+  function jaLogado() {
+    var d = new URLSearchParams(location.search).get('destino');
+    location.href = d && d.charAt(0) === '/' ? d : '/inicio';
+  }
+
   var atual = null;
   try { atual = localStorage.getItem(CHAVE); } catch (e) { /* modo privado */ }
   if (atual) {
     fetch('/pay/api/account', { headers: { 'x-session': atual } })
-      .then(function (r) { if (r.ok) location.href = '/inicio'; })
+      .then(function (r) { if (r.ok) jaLogado(); })
       .catch(function () { /* sessão morta: fica na tela de login */ });
   }
 })();

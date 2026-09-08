@@ -124,25 +124,18 @@ export const DEPOSIT_PAGE_HTML = String.raw`<!doctype html>
   <div class="steps"><div id="s1" class="on"></div><div id="s2"></div></div>
   <div id="alert" class="banner e hide"></div>
 
-  <!-- ── Passo 0: cadastro / entrada ── -->
+  <!-- ── Passo 0: a entrada é uma só, e não é aqui ── -->
   <section id="auth">
-    <h2>Entre ou crie a sua conta</h2>
-    <div class="tabs">
-      <button id="tabRegister" class="on">Criar conta</button>
-      <button id="tabLogin">Já tenho conta</button>
-    </div>
-    <p class="dim" id="authHelp" style="font-size:12px;margin:10px 0 0">
-      Criamos uma carteira Solana para você no cadastro. Todo SOL que você comprar
-      cai sempre nela, e você pode exportar a chave quando quiser.
+    <h2>Entre para continuar</h2>
+    <p class="dim" style="font-size:13px;margin:0 0 16px">
+      A sua conta é a mesma para comprar e para vender, e a carteira Solana nasce
+      com ela. Se você já tem uma, é só entrar.
     </p>
-
-    <label for="email">E-mail</label>
-    <input id="email" type="email" autocomplete="email" placeholder="voce@exemplo.com">
-
-    <label for="password">Senha</label>
-    <input id="password" type="password" autocomplete="current-password" placeholder="ao menos 8 caracteres">
-
-    <button id="authGo">Criar conta e carteira</button>
+    <a id="irEntrada" href="/conta?destino=%2Fpay"
+       style="display:block;text-align:center;text-decoration:none;background:var(--acc);
+              color:#07101f;font-weight:650;border-radius:8px;padding:13px;font-size:15px">
+      Entrar ou criar conta
+    </a>
   </section>
 
   <!-- ── Minha conta ── -->
@@ -373,7 +366,6 @@ export const DEPOSIT_PAGE_HTML = String.raw`<!doctype html>
 
   // ── Passo 0: cadastro, entrada e conta ──
 
-  var mode = 'register';
   var account = null;
 
   function show(id) {
@@ -382,41 +374,6 @@ export const DEPOSIT_PAGE_HTML = String.raw`<!doctype html>
     });
     $('acctBar').className = account ? 'acct' : 'acct hide';
   }
-
-  function setMode(next) {
-    mode = next;
-    $('tabRegister').className = next === 'register' ? 'on' : '';
-    $('tabLogin').className = next === 'login' ? 'on' : '';
-    $('authGo').textContent = next === 'register' ? 'Criar conta e carteira' : 'Entrar';
-    $('password').setAttribute('autocomplete', next === 'register' ? 'new-password' : 'current-password');
-    $('authHelp').textContent = next === 'register'
-      ? 'Criamos uma carteira Solana para você no cadastro. Todo SOL que você comprar cai sempre nela, e você pode exportar a chave quando quiser.'
-      : 'Entre para depositar na mesma carteira de sempre.';
-    alertBox('');
-  }
-
-  function doAuth() {
-    alertBox('');
-    $('authGo').disabled = true;
-    api('/pay/api/auth/' + mode, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: $('email').value, password: $('password').value }),
-    }).then(function (res) {
-      setSession(res.token);
-      $('password').value = '';
-      return refreshAccount();
-    }).then(function () {
-      // Depois do cadastro, a carteira já aparece com saldo e os dois botões.
-      show('account');
-      return refreshWithdraw();
-    }).catch(function (err) {
-      alertBox(err.message);
-    }).then(function () {
-      $('authGo').disabled = false;
-    });
-  }
-
 
   function refreshAccount() {
     if (!session) return Promise.resolve(null);
@@ -461,16 +418,12 @@ export const DEPOSIT_PAGE_HTML = String.raw`<!doctype html>
       if (String(err.message).indexOf('login') !== -1) {
         setSession(null);
         account = null;
-        show('auth');
+        irParaEntrada();
       }
       throw err;
     });
   }
 
-  $('tabRegister').addEventListener('click', function () { setMode('register'); });
-  $('tabLogin').addEventListener('click', function () { setMode('login'); });
-  $('authGo').addEventListener('click', doAuth);
-  $('password').addEventListener('keydown', function (e) { if (e.key === 'Enter') doAuth(); });
 
   $('acctOpen').addEventListener('click', function () {
     alertBox('');
@@ -501,7 +454,9 @@ export const DEPOSIT_PAGE_HTML = String.raw`<!doctype html>
       setSession(null);
       account = null;
       $('mySecretBox').className = 'box danger hide';
-      show('auth');
+      // Sair leva à raiz, não à ponte: quem saiu de propósito não quer ser
+      // devolvido a uma tela de login do mesmo lugar de onde acabou de sair.
+      location.href = '/';
     });
   });
 
@@ -653,8 +608,9 @@ export const DEPOSIT_PAGE_HTML = String.raw`<!doctype html>
         amount: Number($('amount').value),
         // Com conta, o servidor ignora este campo e usa a carteira dela.
         customerWallet: account ? '' : ($('genWallet').checked ? '' : $('wallet').value.trim()),
-        // Só usado sem conta: o Pix do MP exige e-mail do pagador.
-        email: account ? undefined : $('email').value.trim(),
+        // O e-mail do pagador vem da conta — chegar ao formulário sem uma
+        // deixou de ser possível desde que a entrada passou a ser /conta.
+        email: undefined,
       }),
     }).then(function (view) {
       // O token de posse vem UMA vez, na criação: é o que prova, depois, que
@@ -1022,13 +978,25 @@ export const DEPOSIT_PAGE_HTML = String.raw`<!doctype html>
     navigator.serviceWorker.register('/pwa/sw.js', { scope: '/pay' }).catch(function () {});
   }
 
-  setMode('register');
-
   var fromUrl = (location.search.match(/[?&]ref=([^&]+)/) || [])[1];
 
-  // Com sessão válida, entra direto no formulário; sem ela, pede cadastro.
-  // O acompanhamento de um depósito por URL funciona nos dois casos — quem
-  // recebeu o link não precisa ter conta para ver o estado.
+  /**
+   * Para onde a entrada leva, e por que ela não mora aqui.
+   *
+   * O cadastro tinha um segundo formulário nesta página, e quem já tinha
+   * conta chegava aqui achando que precisava se cadastrar de novo. A conta é
+   * uma só; a porta também passou a ser: /conta.
+   *
+   * A exceção é quem chega com ?ref= — esse é cliente de UMA LOJA, veio pagar
+   * um pedido e não é usuário nosso. Exigir cadastro dele mataria a conversão
+   * da loja que confiou na gente. Ele paga sem conta nenhuma.
+   */
+  function irParaEntrada() {
+    show('auth');
+    var destino = encodeURIComponent(location.pathname + location.search);
+    location.href = '/conta?destino=' + destino;
+  }
+
   (session ? refreshAccount().catch(function () { return null; }) : Promise.resolve(null))
     .then(function () {
       return loadOptions();
@@ -1036,7 +1004,7 @@ export const DEPOSIT_PAGE_HTML = String.raw`<!doctype html>
     .then(function () {
       if (fromUrl) track(decodeURIComponent(fromUrl));
       else if (account) { show('account'); refreshWithdraw(); }
-      else show('auth');
+      else irParaEntrada();
     });
 })();
 </script>
